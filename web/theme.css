@@ -1,0 +1,88 @@
+/* Apipost 单机版同款主题 token（自官方产物提取，暖纸金 / 暗色） */
+
+:root,
+[data-theme='golden'] {
+  --color-primary: #8a6b3b;
+  --color-primary-hover: #715830;
+  --color-primary-opacity: rgba(156, 124, 74, 0.08);
+  --color-selected-border: rgba(138, 107, 59, 0.5);
+
+  --bg-page: #faf5ea;
+  --bg-side: #f3ead8;
+  --bg-content: #ffffff;
+  --bg-header: #f4eddf;
+  --bg-search: #faf5ea;
+  --bg-table-header: #f3ead8;
+  --bg-folder-hover: rgba(156, 124, 74, 0.14);
+  --bg-select-hover: rgba(156, 124, 74, 0.08);
+  --bg-highlight-change: #f3ead8;
+  --bg-deep-gray: #eae0cb;
+  --bg-tooltip: #f3ead8;
+
+  --border-color: rgba(147, 117, 63, 0.16);
+  --border-strong: rgba(147, 117, 63, 0.32);
+  --divider: rgba(147, 117, 63, 0.16);
+
+  --font-title: #2c2214;
+  --font-content: #6b5d48;
+  --font-light: #9c9080;
+  --icon-color: #9c9080;
+
+  --color-error: #ff583e;
+  --color-success: #26cea4;
+  --color-warning: #ffb400;
+  --color-warning-bg: rgba(255, 180, 0, 0.1);
+  --color-info: #097bed;
+  --color-info-bg: rgba(9, 123, 237, 0.1);
+
+  --scrollbar-thumb: #eae0cb;
+  --scrollbar-thumb-hover: #dccba8;
+  --shadow-modal: rgba(44, 34, 20, 0.08);
+  --shadow-card: 0 1px 2px rgba(44, 34, 20, 0.06);
+  --modal-bg: #ffffff;
+  --modal-mask: rgba(58, 46, 28, 0.5);
+  --code-bg: #f6f1e5;
+}
+
+[data-theme='dark'] {
+  --color-primary: #e4c990;
+  --color-primary-hover: #bba576;
+  --color-primary-opacity: rgba(196, 164, 115, 0.1);
+  --color-selected-border: rgba(228, 201, 144, 0.5);
+
+  --bg-page: #17140f;
+  --bg-side: #241f17;
+  --bg-content: #1d1913;
+  --bg-header: #14110d;
+  --bg-search: #17140f;
+  --bg-table-header: #241f17;
+  --bg-folder-hover: rgba(196, 164, 115, 0.14);
+  --bg-select-hover: rgba(196, 164, 115, 0.1);
+  --bg-highlight-change: #241f17;
+  --bg-deep-gray: #2a241a;
+  --bg-tooltip: #0f0d09;
+
+  --border-color: rgba(196, 164, 115, 0.14);
+  --border-strong: rgba(196, 164, 115, 0.28);
+  --divider: rgba(196, 164, 115, 0.14);
+
+  --font-title: #f1e9d8;
+  --font-content: #b9ae9a;
+  --font-light: #7d7568;
+  --icon-color: #7d7568;
+
+  --color-error: #ff583e;
+  --color-success: #26cea4;
+  --color-warning: #ffb400;
+  --color-warning-bg: rgba(255, 180, 0, 0.12);
+  --color-info: #4d9bff;
+  --color-info-bg: rgba(77, 155, 255, 0.12);
+
+  --scrollbar-thumb: #2a241a;
+  --scrollbar-thumb-hover: #332b1e;
+  --shadow-modal: rgba(0, 0, 0, 0.35);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --modal-bg: #1d1913;
+  --modal-mask: rgba(10, 8, 6, 0.7);
+  --code-bg: #221d15;
+}

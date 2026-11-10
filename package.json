@@ -1,0 +1,30 @@
+{
+  "name": "apipost-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "API版 MCP 服务 (Windows) — 影子工作区，官方 30 工具兼容",
+  "bin": {
+    "apipost-mcp": "./src/main.js"
+  },
+  "scripts": {
+    "start": "node src/main.js",
+    "serve": "node src/main.js --serve",
+    "stdio": "node src/main.js --stdio",
+    "assets": "node scripts/gen-assets.mjs",
+    "icon": "node scripts/gen-icon.mjs",
+    "test": "node --test --test-timeout=25000 \"test/*.test.mjs\"",
+    "build": "node scripts/build.mjs",
+    "build:desktop": "node scripts/build-desktop.mjs",
+    "dev:desktop": "node scripts/build-desktop.mjs --bundle-only && electron dist/desktop/app"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.3.0",
+    "electron": "^45.2.3",
+    "esbuild": "^0.25.0",
+    "postject": "^1.0.0-alpha.6"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

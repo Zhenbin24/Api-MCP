@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="golden">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>API MCP 控制台</title>
+    <link rel="stylesheet" href="/theme.css" />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="layout">
+      <header class="topbar">
+        <div class="logo">
+          <span class="logo-dot">AP</span>
+          <span>API MCP</span>
+        </div>
+        <span class="status-pill" id="status-pill"><span class="dot"></span><span id="status-text">连接中</span></span>
+        <span class="spacer"></span>
+        <span class="hint mono" id="endpoint"></span>
+      </header>
+
+      <div class="body">
+        <nav class="sidebar" id="sidebar"></nav>
+        <main class="content" id="content"></main>
+      </div>
+    </div>
+
+    <div id="toast"></div>
+    <div id="modal-root"></div>
+
+    <script src="/app.js"></script>
+    <script src="/design.js"></script>
+    <script src="/extra.js"></script>
+    <script src="/recent.js"></script>
+    <script type="module" src="/curl-parse.js"></script>
+  </body>
+</html>
