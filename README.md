@@ -172,7 +172,3 @@ npm test
 - 仅支持 HTTP 接口执行（`target_type === 'api'`）；SSE / WebSocket / gRPC / Mock / 数据库请求不在工具范围内
 - 鉴权支持 `noauth / basic / bearer / kv(apikey) / oauth2(静态 token) / inherit`；`awsv4 / digest / hawk / ntlm / oauth1 / edgegrid / asap / jwt` 会明确报错
 - 一个项目同一时刻只建议一个写入方；Apipost 打开并正在编辑时，请保存后再 pull
-
-## 免责
-
-本软件与 Apipost 官方无隶属关系，仅按官方 MCP 工具语义读写你本机 Apipost 单机版的项目数据。默认影子副本策略下官方数据零风险。
