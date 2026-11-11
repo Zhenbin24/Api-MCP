@@ -10,14 +10,14 @@ async function boot() {
   const env = makeTempRoot();
   const config = {
     ...defaultConfig(),
+    enabled: true,
     token: 'test-token',
     ui_token: 'test-ui',
     port: 0,
     data_root: env.root,
-    shadow_root: env.shadow,
     allowed_project_ids: []
   };
-  const instance = createServer({ config, officialRoot: env.root, shadowRoot: env.shadow });
+  const instance = createServer({ config, officialRoot: env.root });
   const address = await instance.listen(0);
   const base = `http://127.0.0.1:${address.port}`;
   const headers = { 'X-UI-Token': 'test-ui', 'Content-Type': 'application/json' };
@@ -39,7 +39,7 @@ async function boot() {
   return { env, instance, req, base };
 }
 
-/** 让影子文件 mtime 错开，模拟「先后保存」 */
+/** 让工作区文件 mtime 错开，模拟「先后保存」 */
 function touch(file, minutesAgo) {
   const t = new Date(Date.now() - minutesAgo * 60_000);
   fs.utimesSync(file, t, t);
@@ -48,7 +48,6 @@ function touch(file, minutesAgo) {
 test('最近：最近保存按 mtime 倒序', async () => {
   const { env, instance, req } = await boot();
   try {
-    await req('POST', `/api/projects/${env.projectId}/pull`, {});
 
     const a = await req('POST', `/api/projects/${env.projectId}/apis`, {
       name: '先保存的',
@@ -63,9 +62,9 @@ test('最近：最近保存按 mtime 倒序', async () => {
       url: 'https://api.test/second'
     });
 
-    const shadowApis = path.join(env.shadow, env.projectId, 'project', 'apis');
-    touch(path.join(shadowApis, `${a.data.target_id}.json`), 30);
-    touch(path.join(shadowApis, `${b.data.target_id}.json`), 5);
+    const officialApis = path.join(env.root, 'offline-data', env.projectId, 'apis');
+    touch(path.join(officialApis, `${a.data.target_id}.json`), 30);
+    touch(path.join(officialApis, `${b.data.target_id}.json`), 5);
 
     const res = await req('GET', `/api/projects/${env.projectId}/recent?kind=saved`);
     assert.equal(res.status, 200);
@@ -90,7 +89,6 @@ test('最近：最近保存按 mtime 倒序', async () => {
 test('最近：关键字过滤（名称/URL/方法）', async () => {
   const { env, instance, req } = await boot();
   try {
-    await req('POST', `/api/projects/${env.projectId}/pull`, {});
     await req('POST', `/api/projects/${env.projectId}/apis`, {
       name: '订单查询',
       target_type: 'api',
@@ -125,7 +123,6 @@ test('最近：关键字过滤（名称/URL/方法）', async () => {
 test('最近：limit 生效', async () => {
   const { env, instance, req } = await boot();
   try {
-    await req('POST', `/api/projects/${env.projectId}/pull`, {});
     for (let i = 0; i < 5; i += 1) {
       await req('POST', `/api/projects/${env.projectId}/apis`, {
         name: `批量${i}`,
@@ -145,7 +142,6 @@ test('最近：limit 生效', async () => {
 test('最近：历史发送记录（空 → 有记录）', async () => {
   const { env, instance, req } = await boot();
   try {
-    await req('POST', `/api/projects/${env.projectId}/pull`, {});
 
     const empty = await req('GET', `/api/projects/${env.projectId}/recent?kind=runs`);
     assert.equal(empty.status, 200);
@@ -153,9 +149,9 @@ test('最近：历史发送记录（空 → 有记录）', async () => {
     assert.equal(empty.data.items.length, 0);
 
     // 直接写一条 run 记录（避免依赖外网）
-    const { openShadow } = await import('../src/store/shadow.js');
+    const { openProject } = await import('../src/store/target.js');
     const { saveRun } = await import('../src/store/runs.js');
-    const target = openShadow({ shadowRoot: env.shadow, projectId: env.projectId });
+    const target = openProject({ officialRoot: env.root, projectId: env.projectId });
     saveRun(target, {
       run_id: 'run_recent_test',
       project_id: env.projectId,
@@ -208,10 +204,9 @@ test('最近：历史发送记录（空 → 有记录）', async () => {
 test('最近：run 详情接口', async () => {
   const { env, instance, req } = await boot();
   try {
-    await req('POST', `/api/projects/${env.projectId}/pull`, {});
-    const { openShadow } = await import('../src/store/shadow.js');
+    const { openProject } = await import('../src/store/target.js');
     const { saveRun } = await import('../src/store/runs.js');
-    const target = openShadow({ shadowRoot: env.shadow, projectId: env.projectId });
+    const target = openProject({ officialRoot: env.root, projectId: env.projectId });
     saveRun(target, {
       run_id: 'run_detail_test',
       project_id: env.projectId,

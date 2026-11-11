@@ -2,6 +2,7 @@ node_modules/
 dist/
 build/icon.ico
 build/icon.png
+web/icon.png
 *.log
 .DS_Store
 tmp-debug.mjs

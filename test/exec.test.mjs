@@ -2,8 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { makeTempRoot, cleanup, makeContext, startFakeServer } from './helpers.mjs';
-import { pullProject, pushProject } from '../src/sync/index.js';
-import { openShadow } from '../src/store/shadow.js';
+import { openProject } from '../src/store/target.js';
 import { createApiOrFolder, readApiFile, writeApiFile, findApiItem } from '../src/store/apis.js';
 import { upsertEnvVariable, createEnvironment } from '../src/store/envs.js';
 import { callTool } from '../src/mcp/tools.js';
@@ -13,8 +12,7 @@ import { TOOLS } from '../src/mcp/schemas.js';
 async function setup({ withServer = true } = {}) {
   const env = makeTempRoot();
   const server = withServer ? await startFakeServer() : { url: '', calls: [], close: async () => {} };
-  pullProject(env.root, env.shadow, env.projectId);
-  const target = openShadow({ shadowRoot: env.shadow, projectId: env.projectId });
+  const target = openProject({ officialRoot: env.root, projectId: env.projectId });
 
   // 让测试环境的默认服务地址与 base 变量指向假服务
   const envFile = target.readJson('project/envs/2503d4840ac010.json');
@@ -423,10 +421,10 @@ test('协议：initialize / tools/list / tools/call 结构', async () => {
   try {
     const init = await handleMessage({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } }, ctx);
     assert.equal(init.result.protocolVersion, '2025-06-18');
-    assert.equal(init.result.serverInfo.name, 'apipost-offline');
+    assert.equal(init.result.serverInfo.name, 'apimcp');
 
     const list = await handleMessage({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, ctx);
-    assert.equal(list.result.tools.length, 30);
+    assert.equal(list.result.tools.length, 32);
     assert.ok(list.result.tools.every((t) => t.name.startsWith('apipost_')));
     assert.ok(list.result.tools.every((t) => t.inputSchema && t.inputSchema.type === 'object'));
 
@@ -454,7 +452,7 @@ test('协议：initialize / tools/list / tools/call 结构', async () => {
   }
 });
 
-test('工具：30 个工具名称与官方一致', () => {
+test('工具：32 个工具名称（官方 30 + 全局参数 2）', () => {
   const expected = [
     'apipost_list_projects',
     'apipost_create_project',
@@ -478,6 +476,8 @@ test('工具：30 个工具名称与官方一致', () => {
     'apipost_get_global_variables',
     'apipost_upsert_global_variable',
     'apipost_delete_global_variable',
+    'apipost_get_global_params',
+    'apipost_update_global_params',
     'apipost_create_execution_flow',
     'apipost_update_execution_flow',
     'apipost_list_execution_flows',

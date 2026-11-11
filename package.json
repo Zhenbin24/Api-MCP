@@ -1,11 +1,11 @@
 {
-  "name": "apipost-mcp",
+  "name": "apimcp",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "API版 MCP 服务 (Windows) — 影子工作区，官方 30 工具兼容",
+  "description": "API版 MCP 服务 (Windows) — 直连 Apipost 单机版，官方 30 工具兼容",
   "bin": {
-    "apipost-mcp": "./src/main.js"
+    "apimcp": "./src/main.js"
   },
   "scripts": {
     "start": "node src/main.js",

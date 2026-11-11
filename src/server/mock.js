@@ -3,7 +3,7 @@
  * Mock 配置存在接口文件的 data.mock 里：{ enabled, status, delay_ms, schema, priority }
  */
 import http from 'node:http';
-import { openShadow } from '../store/shadow.js';
+import { openProject } from '../store/target.js';
 import { readApiIndex, readApiFile, findApiItem } from '../store/apis.js';
 import { listProjects } from '../store/projects.js';
 
@@ -87,7 +87,7 @@ function urlToPattern(rawUrl) {
 /** 找到匹配请求的 mock 接口 */
 function matchMock(ctx, method, pathname) {
   for (const project of ctx.projects()) {
-    const target = openShadow({ shadowRoot: ctx.shadowRoot, projectId: project.project_id });
+    const target = openProject({ officialRoot: ctx.officialRoot, projectId: project.project_id });
     let index;
     try {
       index = readApiIndex(target);
@@ -112,7 +112,7 @@ function matchMock(ctx, method, pathname) {
 export function listMocks(ctx) {
   const out = [];
   for (const project of ctx.projects()) {
-    const target = openShadow({ shadowRoot: ctx.shadowRoot, projectId: project.project_id });
+    const target = openProject({ officialRoot: ctx.officialRoot, projectId: project.project_id });
     let index;
     try {
       index = readApiIndex(target);
@@ -148,9 +148,8 @@ function mockPathOf(rawUrl) {
 
 /* ---------------- 服务 ---------------- */
 
-export function createMockServer({ shadowRoot, officialRoot, config, log = () => {} }) {
+export function createMockServer({ officialRoot, config, log = () => {} }) {
   const ctx = {
-    shadowRoot,
     officialRoot,
     projects: () => listProjects(officialRoot)
   };

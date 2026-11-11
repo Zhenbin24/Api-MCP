@@ -54,6 +54,10 @@ const state = {
   config: null,
   projects: [],
   view: 'design',
+  /** 顶栏切换的当前项目（与接口设计页双向同步） */
+  currentProjectId: null,
+  currentEnvId: '',
+  environments: [],
   activeProject: null,
   tree: null,
   flows: [],
@@ -96,6 +100,51 @@ function toast(message, isError = false) {
 
 function esc(str) {
   return String(str ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+}
+
+/**
+ * 写剪贴板。
+ *
+ * 先走异步 Clipboard API；被拒（Electron 权限、文档未聚焦、非安全上下文）时
+ * 降级到隐藏 textarea + execCommand('copy')，该路径不经权限处理器。
+ *
+ * @returns {Promise<{ok: boolean, error: Error|null}>}
+ */
+async function copyText(text) {
+  const content = String(text ?? '');
+  let firstError = null;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(content);
+      return { ok: true, error: null };
+    }
+  } catch (err) {
+    // 落到下面的 execCommand 兜底
+    firstError = err;
+  }
+
+  try {
+    const area = document.createElement('textarea');
+    area.value = content;
+    // 不能用 display:none / visibility:hidden，否则无法选中
+    area.setAttribute('readonly', '');
+    area.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;opacity:0;';
+    document.body.appendChild(area);
+    area.select();
+    area.setSelectionRange(0, area.value.length);
+    const ok = document.execCommand('copy');
+    area.remove();
+    if (ok) return { ok: true, error: null };
+    return { ok: false, error: firstError || new Error('浏览器拒绝了复制操作') };
+  } catch (err) {
+    return { ok: false, error: firstError || err };
+  }
+}
+
+/** 复制失败时的统一提示（带原因，方便排查） */
+function toastCopyFailed(error) {
+  const reason = error?.message ? `：${error.message}` : '';
+  toast(`复制失败${reason}`, true);
 }
 
 function fmtTime(iso) {
@@ -233,6 +282,36 @@ async function refreshConfig() {
 async function refreshProjects() {
   const data = await api.get('/projects');
   state.projects = data.projects || [];
+  if (!state.currentProjectId || !state.projects.some((p) => p.project_id === state.currentProjectId)) {
+    state.currentProjectId = state.projects[0]?.project_id || null;
+  }
+}
+
+/** 顶栏：拉当前项目的环境列表 */
+async function refreshEnvironments(projectId) {
+  const targetId = projectId || state.currentProjectId;
+  if (!targetId) {
+    state.environments = [];
+    state.currentEnvId = '';
+    return;
+  }
+  try {
+    const res = await api.get(`/projects/${targetId}/environments`);
+    state.environments = res.environments || [];
+    state.currentEnvId = res.current_env_id || state.environments[0]?.env_id || '';
+  } catch {
+    state.environments = [];
+    state.currentEnvId = '';
+  }
+}
+
+/** 切换当前环境（写入项目记录，并同步内存态） */
+async function switchEnvironment(projectId, envId) {
+  await api.post(`/projects/${projectId}/environments/current`, { environment_id: envId });
+  state.currentEnvId = envId;
+  const target = state.environments.find((e) => e.env_id === envId);
+  if (target) state.environments = state.environments.map((e) => ({ ...e, is_current: e.env_id === envId }));
+  toast(`已切换到环境「${target?.name || envId}」`);
 }
 
 async function loadProjectData(projectId) {
@@ -250,9 +329,9 @@ async function loadProjectData(projectId) {
 
 const DEFAULT_NAV = [
   { key: 'design', label: '接口设计', icon: '✎' },
+  { key: 'envvars', label: '环境与变量', icon: '⛁' },
   { key: 'recent', label: '最近', icon: '◷' },
   { key: 'overview', label: '总览', icon: '◉' },
-  { key: 'projects', label: '项目与同步', icon: '▤' },
   { key: 'clients', label: '客户端配置', icon: '⌘' },
   { key: 'tools', label: '工具清单', icon: '⚙' },
   { key: 'appearance', label: '外观设置', icon: '◑' }
@@ -304,9 +383,9 @@ function renderSidebar() {
 
     node.addEventListener('click', () => {
       // 离开接口编辑器且有未保存改动时确认
-      if (state.view === 'design' && window.ApiDesign?.state?.dirty) {
+      if (state.view === 'design' && window.ApiDesign?.hasUnsaved?.()) {
         if (!confirm('接口编辑器有未保存的修改，确定离开？')) return;
-        window.ApiDesign.state.dirty = false;
+        window.ApiDesign.discardUnsaved();
       }
       state.view = item.key;
       render();
@@ -399,7 +478,6 @@ function viewOverview() {
   const s = state.status || {};
   const c = state.config || {};
   const authorized = (c.allowed_project_ids || []).length;
-  const behind = state.projects.filter((p) => p.sync?.state === 'behind' || p.sync?.state === 'diverged').length;
 
   return el(
     'div',
@@ -597,24 +675,20 @@ function viewOverview() {
           { class: 'kv' },
           el('span', { class: 'k' }, '官方目录'),
           el('span', { class: 'v mono' }, s.official_root || '-'),
-          el('span', { class: 'k' }, '影子目录'),
-          el('span', { class: 'v mono' }, s.shadow_root || '-'),
           el('span', { class: 'k' }, '项目数'),
           el('span', { class: 'v' }, `${state.projects.length} 个（已授权 ${authorized || '全部'}）`),
-          el('span', { class: 'k' }, '待同步'),
-          el(
-            'span',
-            { class: 'v' },
-            behind > 0 ? el('span', { class: 'tag warn' }, `${behind} 个项目需处理`) : el('span', { class: 'tag ok' }, '全部最新')
-          )
+          el('span', { class: 'k' }, '读写方式'),
+          el('span', { class: 'v' }, el('span', { class: 'tag ok' }, '直连官方目录'))
         ),
         el(
           'div',
           { class: 'hint mt12' },
-          '所有 MCP 写入只落在影子目录，需在「项目与同步」中手动推送到 API 单机版。'
+          '所有改动直接写入 API 单机版目录，API 单机版重新进入项目即可看到。'
         )
       )
     ),
+
+    projectAuthSection(),
 
     el(
       'div',
@@ -630,7 +704,7 @@ function viewOverview() {
           el('br'),
           '2. 重启 Cursor，在对话里让它调用 apipost_list_projects',
           el('br'),
-          '3. 改完接口后回到「项目与同步」点「推送」，API 单机版即可看到改动'
+          '3. 改完接口保存即写入 API 单机版，重新进入项目即可看到'
         ),
         el(
           'div',
@@ -645,16 +719,6 @@ function viewOverview() {
               }
             },
             '去配置客户端'
-          ),
-          el(
-            'button',
-            {
-              onclick: () => {
-                state.view = 'projects';
-                render();
-              }
-            },
-            '管理项目同步'
           )
         )
       )
@@ -662,46 +726,36 @@ function viewOverview() {
   );
 }
 
-/* ---------------- 视图：项目与同步 ---------------- */
+/* ---------------- 视图：项目授权（总览页） ---------------- */
 
-const SYNC_LABEL = {
-  synced: { text: '已同步', cls: 'ok' },
-  ahead: { text: '待推送', cls: 'info' },
-  behind: { text: '官方有更新', cls: 'warn' },
-  diverged: { text: '有冲突', cls: 'err' },
-  not_pulled: { text: '未拉取', cls: '' },
-  unknown: { text: '未知', cls: '' },
-  error: { text: '异常', cls: 'err' }
-};
+function toggleProjectAuthorization(projectId, checked) {
+  const list = new Set(state.config.allowed_project_ids || []);
+  if (checked) list.add(projectId);
+  else list.delete(projectId);
+  return api
+    .put('/config', { allowed_project_ids: [...list] })
+    .then(async (cfg) => {
+      state.config = cfg;
+      await refreshProjects();
+      render();
+      toast(checked ? '已授权' : '已取消授权');
+    })
+    .catch((err) => toast(err.message, true));
+}
 
-function viewProjects() {
-  const rows = state.projects.map((p) => {
-    const sync = p.sync || { state: 'not_pulled', changed_files: 0 };
-    const label = SYNC_LABEL[sync.state] || SYNC_LABEL.unknown;
-    const authorized = p.authorized;
-
-    return el(
+/** 「总览」里的项目授权卡片：勾选决定 MCP 是否能访问该项目 */
+function projectAuthSection() {
+  const rows = state.projects.map((p) =>
+    el(
       'tr',
       {},
       el(
         'td',
-        {},
+        { style: 'width:52px' },
         el('label', { class: 'check' }, el('input', {
           type: 'checkbox',
-          checked: authorized,
-          onchange: async (e) => {
-            const list = new Set(state.config.allowed_project_ids || []);
-            if (e.target.checked) list.add(p.project_id);
-            else list.delete(p.project_id);
-            try {
-              state.config = await api.put('/config', { allowed_project_ids: [...list] });
-              await refreshProjects();
-              render();
-              toast(e.target.checked ? '已授权' : '已取消授权');
-            } catch (err) {
-              toast(err.message, true);
-            }
-          }
+          checked: Boolean(p.authorized),
+          onchange: (e) => toggleProjectAuthorization(p.project_id, e.target.checked)
         }))
       ),
       el(
@@ -710,233 +764,65 @@ function viewProjects() {
         el('div', { style: 'font-weight:500;color:var(--font-title)' }, p.name),
         el('div', { class: 'hint mono' }, p.project_id)
       ),
-      el('td', {}, el('span', { class: `tag ${label.cls}` }, label.text), sync.changed_files ? el('span', { class: 'hint', style: 'margin-left:6px' }, `${sync.changed_files} 个文件`) : null),
+      el('td', { style: 'width:160px' }, fmtTime(p.updated_at)),
       el(
         'td',
-        {},
-        p.counts
-          ? el(
-              'div',
-              { class: 'hint' },
-              `接口 ${p.counts.api} · 目录 ${p.counts.folder} · 环境 ${p.counts.environments} · 计划 ${p.counts.flows}`
-            )
-          : el('span', { class: 'hint' }, '-')
-      ),
-      el('td', {}, fmtTime(p.updated_at)),
-      el(
-        'td',
-        {},
+        { style: 'width:90px' },
         el(
-          'div',
-          { class: 'btn-row' },
-          el(
-            'button',
-            {
-              class: 'small',
-              onclick: async () => {
-                try {
-                  await api.post(`/projects/${p.project_id}/pull`, { force: sync.state !== 'ahead' && sync.state !== 'diverged' });
-                  await refreshProjects();
-                  render();
-                  toast('已从 API 拉取最新数据');
-                } catch (err) {
-                  toast(err.message, true);
-                }
-              }
-            },
-            '拉取'
-          ),
-          el(
-            'button',
-            {
-              class: 'small',
-              disabled: sync.changed_files === 0,
-              onclick: async () => {
-                try {
-                  const diff = await api.get(`/projects/${p.project_id}/diff`);
-                  openPushModal(p, diff);
-                } catch (err) {
-                  toast(err.message, true);
-                }
-              }
-            },
-            '推送'
-          ),
-          el(
-            'button',
-            {
-              class: 'small',
-              onclick: async () => {
-                try {
-                  const diff = await api.get(`/projects/${p.project_id}/diff`);
-                  openDiffModal(p, diff);
-                } catch (err) {
-                  toast(err.message, true);
-                }
-              }
-            },
-            '查看差异'
-          ),
-          el(
-            'button',
-            {
-              class: 'small',
-              onclick: () => {
-                state.activeProject = p.project_id;
-                state.view = 'detail';
-                loadProjectData(p.project_id).then(render).catch((e) => toast(e.message, true));
-              }
-            },
-            '浏览'
-          )
+          'button',
+          {
+            class: 'small',
+            onclick: () => {
+              state.activeProject = p.project_id;
+              state.view = 'detail';
+              loadProjectData(p.project_id).then(render).catch((e) => toast(e.message, true));
+            }
+          },
+          '浏览'
         )
       )
-    );
-  });
+    )
+  );
 
   return el(
     'div',
-    {},
-    el('h1', { class: 'page-title' }, '项目与同步'),
-    el('p', { class: 'page-sub' }, '官方目录只读 · 改动先落影子工作区 · 手动推送'),
-
+    { class: 'section' },
+    el('div', { class: 'section-title' }, '项目授权'),
     el(
       'div',
-      { class: 'notice info' },
-      el('span', {}, 'ℹ'),
-      el(
-        'div',
-        {},
-        '「拉取」把 API 的最新数据同步到影子；「推送」把影子里的改动写回 API。两侧都有改动时会标为「有冲突」，需逐文件选择保留哪一侧。'
-      )
-    ),
-
-    state.projects.length === 0
-      ? el('div', { class: 'empty' }, '还没有发现任何项目。请先在 API 单机版里新建项目。')
-      : el(
-          'div',
-          { class: 'table-wrap' },
-          el(
-            'table',
-            {},
+      { class: 'card' },
+      state.projects.length === 0
+        ? el('div', { class: 'empty' }, '还没有发现任何项目。请先在 API 单机版里新建项目。')
+        : el(
+            'div',
+            { class: 'table-wrap' },
             el(
-              'thead',
+              'table',
               {},
               el(
-                'tr',
+                'thead',
                 {},
-                el('th', { style: 'width:52px' }, '授权'),
-                el('th', {}, '项目'),
-                el('th', { style: 'width:170px' }, '同步状态'),
-                el('th', { style: 'width:230px' }, '内容'),
-                el('th', { style: 'width:150px' }, '更新时间'),
-                el('th', { style: 'width:270px' }, '操作')
-              )
-            ),
-            el('tbody', {}, rows)
-          )
-        )
+                el(
+                  'tr',
+                  {},
+                  el('th', { style: 'width:52px' }, '授权'),
+                  el('th', {}, '项目'),
+                  el('th', { style: 'width:160px' }, '更新时间'),
+                  el('th', { style: 'width:90px' }, '操作')
+                )
+              ),
+              el('tbody', {}, rows)
+            )
+          ),
+      el(
+        'div',
+        { class: 'hint mt12' },
+        '取消勾选的项目对 MCP 客户端不可见；全部取消后按「未限制」处理，即所有项目都可访问。'
+      )
+    )
   );
 }
 
-function openDiffModal(project, diff) {
-  const body = el('div', {});
-  if (!diff.entries || diff.entries.length === 0) {
-    body.append(el('div', { class: 'empty' }, '没有差异，两侧数据一致。'));
-  } else {
-    for (const entry of diff.entries) {
-      const kindMap = {
-        ahead: ['影子已修改', 'info'],
-        behind: ['官方已修改', 'warn'],
-        conflict: ['冲突', 'err'],
-        shadow_added: ['影子新增', 'info'],
-        shadow_deleted: ['影子删除', 'warn'],
-        official_added: ['官方新增', 'warn'],
-        official_deleted: ['官方删除', 'warn']
-      };
-      const [text, cls] = kindMap[entry.kind] || [entry.kind, ''];
-      body.append(
-        el(
-          'div',
-          { class: 'diff-row' },
-          el('span', { class: `tag ${cls}` }, text),
-          el('span', { class: 'path' }, entry.path)
-        )
-      );
-    }
-  }
-
-  showModal(`与 API 的差异 · ${project.name}`, body, [el('button', { onclick: closeModal }, '关闭')]);
-}
-
-function openPushModal(project, diff) {
-  const selections = {};
-  const body = el('div', {});
-
-  const pushable = (diff.entries || []).filter((e) =>
-    ['ahead', 'shadow_added', 'shadow_deleted', 'conflict'].includes(e.kind)
-  );
-
-  if (pushable.length === 0) {
-    body.append(el('div', { class: 'empty' }, '影子工作区没有需要推送的改动。'));
-  } else {
-    body.append(
-      el('div', { class: 'hint', style: 'margin-bottom:10px' }, `将推送 ${pushable.length} 个文件到 API 单机版：`)
-    );
-    for (const entry of pushable) {
-      const isConflict = entry.kind === 'conflict';
-      body.append(
-        el(
-          'div',
-          { class: 'diff-row' },
-          el('span', { class: `tag ${isConflict ? 'err' : 'info'}` }, isConflict ? '冲突' : '变更'),
-          el('span', { class: 'path' }, entry.path),
-          isConflict
-            ? el(
-                'select',
-                {
-                  style: 'width:150px',
-                  onchange: (e) => {
-                    selections[entry.path] = e.target.value;
-                  }
-                },
-                el('option', { value: '' }, '选择保留…'),
-                el('option', { value: 'shadow' }, '用影子覆盖'),
-                el('option', { value: 'official' }, '保留官方')
-              )
-            : el('span', { class: 'tag ok' }, '使用影子')
-        )
-      );
-    }
-  }
-
-  const doPush = el(
-    'button',
-    {
-      class: 'primary',
-      disabled: pushable.length === 0,
-      onclick: async () => {
-        try {
-          const res = await api.post(`/projects/${project.project_id}/push`, { selections });
-          closeModal();
-          await refreshProjects();
-          render();
-          toast(`已推送 ${res.applied.length} 个文件到 API`);
-        } catch (err) {
-          toast(err.message, true);
-        }
-      }
-    },
-    '确认推送'
-  );
-
-  showModal(`推送到 API · ${project.name}`, body, [
-    el('button', { onclick: closeModal }, '取消'),
-    doPush
-  ]);
-}
-
-/* ---------------- 视图：项目详情 ---------------- */
 
 function renderTreeNode(node, depth = 0) {
   const indent = 14 + depth * 16;
@@ -997,7 +883,7 @@ function viewProjectDetail() {
         {
           class: 'small',
           onclick: () => {
-            state.view = 'projects';
+            state.view = 'overview';
             render();
           }
         },
@@ -1138,7 +1024,7 @@ async function viewClients() {
       el(
         'div',
         {},
-        `stdio 模式（推荐）：客户端拉起的命令是 "${cfg.command} --stdio"，直接从影子读取数据。`,
+        `stdio 模式（推荐）：客户端拉起的命令是 "${cfg.command} --stdio"，直接读取 API 单机版数据。`,
         el('br'),
         'HTTP 模式需把 <token> 换成上方总览里显示的 Bearer Token。'
       )
@@ -1171,12 +1057,9 @@ async function viewClients() {
         {
           class: 'primary',
           onclick: async () => {
-            try {
-              await navigator.clipboard.writeText(content);
-              toast('已复制到剪贴板');
-            } catch {
-              toast('复制失败，请手动选择文本', true);
-            }
+            const res = await copyText(content);
+            if (res.ok) toast('已复制到剪贴板');
+            else toastCopyFailed(res.error);
           }
         },
         '复制配置'
@@ -1222,7 +1105,7 @@ function viewTools() {
   const groups = [
     ['项目与 API', ['apipost_list_projects', 'apipost_create_project', 'apipost_list_apis', 'apipost_get_api_detail', 'apipost_sync_openapi', 'apipost_delete_apis']],
     ['接口执行', ['apipost_execute_api']],
-    ['环境与变量', ['apipost_list_environments', 'apipost_switch_environment', 'apipost_create_environment', 'apipost_update_environment', 'apipost_delete_environment', 'apipost_list_environment_servers', 'apipost_create_environment_server', 'apipost_update_environment_server', 'apipost_delete_environment_server', 'apipost_get_environment_variables', 'apipost_upsert_environment_variable', 'apipost_delete_environment_variable', 'apipost_get_global_variables', 'apipost_upsert_global_variable', 'apipost_delete_global_variable']],
+    ['环境与变量', ['apipost_list_environments', 'apipost_switch_environment', 'apipost_create_environment', 'apipost_update_environment', 'apipost_delete_environment', 'apipost_list_environment_servers', 'apipost_create_environment_server', 'apipost_update_environment_server', 'apipost_delete_environment_server', 'apipost_get_environment_variables', 'apipost_upsert_environment_variable', 'apipost_delete_environment_variable', 'apipost_get_global_variables', 'apipost_upsert_global_variable', 'apipost_delete_global_variable', 'apipost_get_global_params', 'apipost_update_global_params']],
     ['执行计划', ['apipost_create_execution_flow', 'apipost_update_execution_flow', 'apipost_list_execution_flows', 'apipost_get_execution_flow', 'apipost_delete_execution_flow', 'apipost_execute_flow']],
     ['执行历史', ['apipost_list_execution_runs', 'apipost_get_execution_result']]
   ];
@@ -1234,7 +1117,7 @@ function viewTools() {
     'div',
     {},
     el('h1', { class: 'page-title' }, '工具清单'),
-    el('p', { class: 'page-sub' }, `共 ${total} 个与官方一致的 apipost_* 工具`),
+    el('p', { class: 'page-sub' }, `共 ${total} 个 apipost_* 工具（官方 30 个 + 全局参数 2 个）`),
     ...groups.map(([name, tools]) =>
       el(
         'div',
@@ -1258,7 +1141,7 @@ function viewTools() {
 }
 
 const TOOL_DESC = {
-  apipost_list_projects: '获取已授权项目清单与同步状态',
+  apipost_list_projects: '获取已授权项目清单',
   apipost_create_project: '本地新建项目并自动授权',
   apipost_list_apis: '查询目录、接口与文档清单',
   apipost_get_api_detail: '读取接口完整定义、参数、响应和脚本',
@@ -1280,6 +1163,8 @@ const TOOL_DESC = {
   apipost_get_global_variables: '读取项目全局变量',
   apipost_upsert_global_variable: '新增或修改全局变量',
   apipost_delete_global_variable: '删除全局变量',
+  apipost_get_global_params: '读取项目全局参数（header/query/cookie/body/鉴权/脚本）',
+  apipost_update_global_params: '局部更新全局参数，只覆盖传入的 section',
   apipost_create_execution_flow: '创建执行计划（固化接口快照）',
   apipost_update_execution_flow: '更新已有执行计划',
   apipost_list_execution_flows: '查询执行计划摘要',
@@ -1465,11 +1350,9 @@ function viewAbout() {
         el('span', { class: 'k' }, '工具数'),
         el('span', { class: 'v' }, `${s.tool_count || 0} 个`),
         el('span', { class: 'k' }, '配置文件'),
-        el('span', { class: 'v mono' }, s.config_path || '%APPDATA%\\ApiPostMCP\\config.json'),
+        el('span', { class: 'v mono' }, s.config_path || '%APPDATA%\\ApiMCP\\config.json'),
         el('span', { class: 'k' }, '数据目录'),
-        el('span', { class: 'v mono' }, s.official_root || '-'),
-        el('span', { class: 'k' }, '影子目录'),
-        el('span', { class: 'v mono' }, s.shadow_root || '-')
+        el('span', { class: 'v mono' }, s.official_root || '-')
       )
     ),
     el(
@@ -1479,7 +1362,7 @@ function viewAbout() {
       el(
         'div',
         {},
-        '本软件与 Apipost 官方无隶属关系。它只按官方 MCP 工具语义读写你本机 Apipost 单机版的项目数据，且默认采用影子副本策略：官方目录只读，写入需你手动推送。'
+        '本软件与 Apipost 官方无隶属关系。它只按官方 MCP 工具语义读写你本机 Apipost 单机版的项目数据，改动直接写入官方目录。'
       )
     )
   );
@@ -1509,10 +1392,76 @@ function closeModal() {
   $('modal-root').innerHTML = '';
 }
 
+/* ---------------- 顶栏：项目 / 环境切换 ---------------- */
+
+function renderTopbarEnvs() {
+  const host = $('topbar-envs');
+  if (!host) return;
+  host.innerHTML = '';
+
+  if (state.projects.length === 0) {
+    host.append(el('span', { class: 'hint' }, '暂无项目'));
+    return;
+  }
+
+  const projectSelect = el(
+    'select',
+    {
+      class: 'topbar-select',
+      title: '切换项目',
+      onchange: async (e) => {
+        state.currentProjectId = e.target.value;
+        if (window.ApiDesign?.state) window.ApiDesign.state.projectId = e.target.value;
+        if (state.view === 'design' && window.ApiDesign?.hasUnsaved?.()) {
+          if (!confirm('接口编辑器有未保存的修改，确定切换项目？')) {
+            e.target.value = state.currentProjectId;
+            return;
+          }
+          window.ApiDesign.discardUnsaved();
+        }
+        await refreshEnvironments(e.target.value);
+        if (window.ApiEnvvars) {
+          window.ApiEnvvars.state.projectId = e.target.value;
+          window.ApiEnvvars.state.activeEnvId = '';
+        }
+        render();
+        if (state.view === 'envvars') await window.ApiEnvvars.reload();
+      }
+    },
+    ...state.projects.map((p) =>
+      el('option', { value: p.project_id, ...(p.project_id === state.currentProjectId ? { selected: true } : {}) }, p.name)
+    )
+  );
+
+  const envSelect = el(
+    'select',
+    {
+      class: 'topbar-select',
+      title: '切换环境',
+      disabled: state.environments.length === 0,
+      onchange: async (e) => {
+        try {
+          await switchEnvironment(state.currentProjectId, e.target.value);
+          if (state.view === 'envvars' && window.ApiEnvvars) await window.ApiEnvvars.reload();
+          render();
+        } catch (err) {
+          toast(err.message, true);
+        }
+      }
+    },
+    ...state.environments.map((env) =>
+      el('option', { value: env.env_id, ...(env.env_id === state.currentEnvId ? { selected: true } : {}) }, env.name || env.env_id)
+    )
+  );
+
+  host.append(el('span', { class: 'hint' }, '项目'), projectSelect, el('span', { class: 'hint' }, '环境'), envSelect);
+}
+
 /* ---------------- 主渲染 ---------------- */
 
 function render() {
   renderSidebar();
+  renderTopbarEnvs();
   const content = $('content');
   content.innerHTML = '';
 
@@ -1524,12 +1473,15 @@ function render() {
   // 供子模块（最近 / 接口设计）访问的桥接
   window.__consoleState = state;
   window.__consoleToast = toast;
+  window.__consoleApi = api;
+  window.__consoleCopy = copyText;
+  window.__consoleCopyFailed = toastCopyFailed;
   window.__consoleCloseModal = closeModal;
   window.__consoleShowModal = showModal;
   window.__consoleOpenDesign = async (projectId, targetId) => {
-    if (state.view === 'design' && window.ApiDesign?.state?.dirty) {
+    if (state.view === 'design' && window.ApiDesign?.hasUnsaved?.()) {
       if (!confirm('接口编辑器有未保存的修改，确定离开？')) return;
-      window.ApiDesign.state.dirty = false;
+      window.ApiDesign.discardUnsaved();
     }
     state.designProjectId = projectId;
     state.view = 'design';
@@ -1553,11 +1505,11 @@ function render() {
     case 'overview':
       viewNode = viewOverview();
       break;
-    case 'projects':
-      viewNode = viewProjects();
-      break;
     case 'design':
       viewNode = window.ApiDesign ? window.ApiDesign.view() : el('div', { class: 'empty' }, '编辑器加载失败');
+      break;
+    case 'envvars':
+      viewNode = window.ApiEnvvars ? window.ApiEnvvars.view() : el('div', { class: 'empty' }, '环境与变量加载失败');
       break;
     case 'detail':
       viewNode = viewProjectDetail();
@@ -1596,6 +1548,7 @@ async function boot() {
     await refreshConfig();
     await refreshStatus();
     await refreshProjects();
+    await refreshEnvironments(state.currentProjectId);
   } catch (err) {
     toast(err.message, true);
   }

@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import { makeTempRoot, cleanup } from './helpers.mjs';
 import { createServer } from '../src/server/serve.js';
 import { defaultConfig } from '../src/server/config.js';
@@ -8,14 +10,14 @@ async function boot() {
   const env = makeTempRoot();
   const config = {
     ...defaultConfig(),
+    enabled: true,
     token: 'test-token',
     ui_token: 'test-ui',
     port: 0,
     data_root: env.root,
-    shadow_root: env.shadow,
     allowed_project_ids: []
   };
-  const instance = createServer({ config, officialRoot: env.root, shadowRoot: env.shadow });
+  const instance = createServer({ config, officialRoot: env.root });
   const address = await instance.listen(0);
   const port = address.port;
   const base = `http://127.0.0.1:${port}`;
@@ -39,7 +41,7 @@ test('HTTP：MCP 端点鉴权与 initialize', async () => {
     });
     assert.equal(ok.status, 200);
     const body = await ok.json();
-    assert.equal(body.result.serverInfo.name, 'apipost-offline');
+    assert.equal(body.result.serverInfo.name, 'apimcp');
 
     const tools = await fetch(`${base}/mcp`, {
       method: 'POST',
@@ -47,7 +49,7 @@ test('HTTP：MCP 端点鉴权与 initialize', async () => {
       body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' })
     });
     const toolsBody = await tools.json();
-    assert.equal(toolsBody.result.tools.length, 30);
+    assert.equal(toolsBody.result.tools.length, 32);
 
     // 通知类消息返回 202
     const notif = await fetch(`${base}/mcp`, {
@@ -71,7 +73,7 @@ test('HTTP：REST API 需 UI token', async () => {
     const ok = await fetch(`${base}/api/status`, { headers: { 'X-UI-Token': 'test-ui' } });
     assert.equal(ok.status, 200);
     const status = await ok.json();
-    assert.equal(status.tool_count, 30);
+    assert.equal(status.tool_count, 32);
     assert.equal(status.official_root_ok, true);
 
     // query token 也允许
@@ -83,35 +85,37 @@ test('HTTP：REST API 需 UI token', async () => {
   }
 });
 
-test('HTTP：项目列表 / diff / pull / push', async () => {
+test('HTTP：项目列表与直连写入', async () => {
   const { env, instance, base } = await boot();
   try {
     const headers = { 'X-UI-Token': 'test-ui', 'Content-Type': 'application/json' };
 
     const list = await (await fetch(`${base}/api/projects`, { headers })).json();
     assert.equal(list.projects.length, 1);
-    assert.equal(list.projects[0].sync.state, 'not_pulled');
+    assert.equal(list.projects[0].authorized, true);
+    // 同步相关字段已随「项目与同步」一起移除
+    assert.equal(list.projects[0].sync, undefined);
+    assert.equal(list.shadow_root, undefined);
 
+    // 已下线的同步路由不再可用
     const pull = await fetch(`${base}/api/projects/${env.projectId}/pull`, { method: 'POST', headers, body: '{}' });
-    const pullBody = await pull.json();
-    assert.equal(pullBody.pulled, true);
-
-    const diff = await (await fetch(`${base}/api/projects/${env.projectId}/diff`, { headers })).json();
-    assert.equal(diff.state, 'synced');
-
-    // 改影子后 diff 应显示 ahead
-    const { openShadow } = await import('../src/store/shadow.js');
-    const target = openShadow({ shadowRoot: env.shadow, projectId: env.projectId });
-    target.writeJson('project/project.json', { ...target.readJson('project/project.json'), intro: 'changed' });
-
-    const diff2 = await (await fetch(`${base}/api/projects/${env.projectId}/diff`, { headers })).json();
-    assert.equal(diff2.state, 'ahead');
-    assert.equal(diff2.entries.length, 1);
-
+    assert.equal(pull.status, 404);
+    const diff = await fetch(`${base}/api/projects/${env.projectId}/diff`, { headers });
+    assert.equal(diff.status, 404);
     const push = await fetch(`${base}/api/projects/${env.projectId}/push`, { method: 'POST', headers, body: '{}' });
-    const pushBody = await push.json();
-    assert.equal(pushBody.applied.length, 1);
-    assert.equal(pushBody.remaining, 'synced');
+    assert.equal(push.status, 404);
+
+    // 编辑器写入直接落官方目录
+    const created = await (await fetch(`${base}/api/projects/${env.projectId}/apis`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ name: '直连接口', method: 'GET', url: 'https://api.test/x' })
+    })).json();
+    assert.equal(created.ok, true);
+    assert.ok(fs.existsSync(path.join(env.root, 'offline-data', env.projectId, 'apis', `${created.target_id}.json`)));
+
+    const tree = await (await fetch(`${base}/api/projects/${env.projectId}/tree`, { headers })).json();
+    assert.equal(tree.tree.length, 1);
   } finally {
     await instance.close();
     cleanup(env.base);
@@ -194,7 +198,7 @@ test('HTTP：配置读写与主题字段', async () => {
   }
 });
 
-test('HTTP��nav_order �־û����ɶ���', async () => {
+test('HTTP��nav_order �־û����ɶ���', async () => {
   const { env, instance, base } = await boot();
   try {
     const headers = { 'X-UI-Token': 'test-ui', 'Content-Type': 'application/json' };
@@ -213,7 +217,7 @@ test('HTTP��nav_order �־û����ɶ���', async () => {
     const config = await got.json();
     assert.deepEqual(config.nav_order, order);
 
-    // ������ʱ��գ�����������
+    // ������ʱ��գ�����������
     const bad = await fetch(`${base}/api/config`, {
       method: 'PUT',
       headers,

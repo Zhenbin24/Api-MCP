@@ -437,12 +437,11 @@ async function openRunDetail(runId) {
       body,
       [
         rEl('button', {
-          onclick: () => {
+          onclick: async () => {
             const text = JSON.stringify(run, null, 2);
-            navigator.clipboard
-              .writeText(text)
-              .then(() => rToast('已复制完整 JSON'))
-              .catch(() => rToast('复制失败', true));
+            const res = await window.__consoleCopy(text);
+            if (res.ok) rToast('已复制完整 JSON');
+            else window.__consoleCopyFailed(res.error);
           }
         }, '复制 JSON'),
         rEl('button', { onclick: () => window.__consoleCloseModal?.() }, '关闭')

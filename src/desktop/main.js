@@ -2,7 +2,7 @@
  * API MCP 桌面端（Electron 主进程）
  *
  * 双击即开独立窗口，窗口内是现有控制台 UI；服务跑在本进程内。
- * 若端口已被常驻的 apipost-mcp.exe 占用且 ui_token 校验通过，则附着模式只开窗口。
+ * 若端口已被常驻的 apimcp.exe 占用且 ui_token 校验通过，则附着模式只开窗口。
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -14,7 +14,15 @@ import { startOrAttach, PortInUseError } from './service-manager.js';
 import { DEFAULT_WINDOW, loadWindowState, saveWindowState } from './window-state.js';
 
 const APP_NAME = 'API MCP';
-const APP_ID = 'com.apipost.mcp.desktop';
+const APP_ID = 'com.apimcp.desktop';
+
+/**
+ * 允许页面使用的 Web 权限。
+ * 只放行剪贴板写入：控制台的「复制 URL / 复制响应 / 复制为 cURL」等按钮
+ * 依赖 navigator.clipboard.writeText()，它对应的是 clipboard-sanitized-write。
+ * 其余权限（摄像头、地理、通知等）一律拒绝。
+ */
+const ALLOWED_WEB_PERMISSIONS = new Set(['clipboard-sanitized-write']);
 
 /** 顶栏高度，与 web/style.css 的 .topbar height 保持一致 */
 const TITLEBAR_HEIGHT = 52;
@@ -34,8 +42,6 @@ function parseArgs(argv) {
     const arg = argv[i];
     if (arg === '--data-root') out.dataRoot = argv[++i];
     else if (arg.startsWith('--data-root=')) out.dataRoot = arg.slice('--data-root='.length);
-    else if (arg === '--shadow-root') out.shadowRoot = argv[++i];
-    else if (arg.startsWith('--shadow-root=')) out.shadowRoot = arg.slice('--shadow-root='.length);
     else if (arg === '--port') out.port = Number(argv[++i]);
     else if (arg.startsWith('--port=')) out.port = Number(arg.slice('--port='.length));
   }
@@ -207,6 +213,18 @@ function registerIpc() {
       win.setTitleBarOverlay({ color, symbolColor, height: TITLEBAR_HEIGHT });
     } catch {}
   });
+
+  // binary Body 选文件：返回绝对路径，供后端读取
+  ipcMain.handle('shell:pick-file', async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const result = await dialog.showOpenDialog(win || mainWindow, {
+      title: '选择要上传的文件',
+      properties: ['openFile']
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+    const filePath = result.filePaths[0];
+    return { path: filePath, name: path.basename(filePath) };
+  });
 }
 
 async function boot() {
@@ -217,15 +235,8 @@ async function boot() {
     config.data_root = path.resolve(args.dataRoot);
     config = saveConfig(config);
   }
-  if (args.shadowRoot) {
-    config.shadow_root = path.resolve(args.shadowRoot);
-    config = saveConfig(config);
-  }
 
-  const { officialRoot, shadowRoot } = resolveRoots(config, {
-    dataRoot: args.dataRoot,
-    shadowRoot: args.shadowRoot
-  });
+  const { officialRoot } = resolveRoots(config, { dataRoot: args.dataRoot });
 
   if (!isOfficialRoot(officialRoot)) {
     log(`[desktop] 未在 ${officialRoot} 找到 API 单机版数据，可在控制台「总览」里指定。`);
@@ -238,9 +249,8 @@ async function boot() {
     attached = await startOrAttach({
       config,
       officialRoot,
-      shadowRoot,
       port,
-      createServer: () => createServer({ config, officialRoot, shadowRoot, log }),
+      createServer: () => createServer({ config, officialRoot, log }),
       log
     });
   } catch (err) {
@@ -301,7 +311,14 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(async () => {
     try {
-      session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
+      // 请求式权限：只放行剪贴板写入
+      session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) =>
+        callback(ALLOWED_WEB_PERMISSIONS.has(permission))
+      );
+      // 同步查询式权限：异步剪贴板写入会先过这里，不放行同样会被拒
+      session.defaultSession.setPermissionCheckHandler((_wc, permission) =>
+        ALLOWED_WEB_PERMISSIONS.has(permission)
+      );
     } catch {}
 
     try {

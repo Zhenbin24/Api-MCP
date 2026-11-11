@@ -5,32 +5,43 @@ import {
   exists,
   isDir,
   listDir,
-  readJson,
   removeFile,
-  writeFileAtomic,
-  writeJsonAtomic
+  writeFileAtomic
 } from '../util/fsx.js';
-import { shadowProjectDir } from './paths.js';
-import { AREA_PROJECT, AREA_LOCAL } from '../sync/index.js';
+import { localProjectDir, projectDir } from './paths.js';
 
 /**
- * 影子项目访问器。
- * 相对路径约定：`project/apis/index.json`、`local/env_vars_history.json`
- * 所有写操作只落在影子目录，官方目录保持只读。
+ * 项目访问器：直接读写 Apipost 单机版官方目录。
+ * 相对路径约定：
+ *   `project/**` -> `offline-data/{pid}/**`
+ *   `local/**`   -> `offline-data-local/projects/{pid}/**`
+ * 例：`project/apis/index.json`、`local/env_vars_history.json`
  */
-export class ShadowProject {
-  constructor({ shadowRoot, projectId }) {
-    if (!shadowRoot) throw new Error('缺少 shadowRoot');
+const AREA_PROJECT = 'project';
+const AREA_LOCAL = 'local';
+
+export class ProjectTarget {
+  constructor({ officialRoot, projectId }) {
+    if (!officialRoot) throw new Error('缺少 officialRoot');
     if (!projectId) throw new Error('缺少 project_id');
-    this.shadowRoot = shadowRoot;
+    this.officialRoot = officialRoot;
     this.projectId = projectId;
-    this.base = shadowProjectDir(shadowRoot, projectId);
+    this.roots = {
+      [AREA_PROJECT]: projectDir(officialRoot, projectId),
+      [AREA_LOCAL]: localProjectDir(officialRoot, projectId)
+    };
   }
 
+  /** 把 `area/rel` 解析成绝对路径（跨区目录，各自独立做越界校验） */
   abs(relPath) {
     const rel = String(relPath || '').replace(/^\/+/, '');
-    const abs = path.resolve(this.base, rel.split('/').join(path.sep));
-    const root = path.resolve(this.base);
+    if (!rel) return path.resolve(this.roots[AREA_PROJECT]);
+    const [area, ...rest] = rel.split('/');
+    const base = this.roots[area];
+    if (!base) throw new Error(`路径越界: ${relPath}`);
+    const tail = rest.join('/');
+    const abs = path.resolve(base, tail.split('/').join(path.sep));
+    const root = path.resolve(base);
     if (abs !== root && !abs.startsWith(root + path.sep)) {
       throw new Error(`路径越界: ${relPath}`);
     }
@@ -102,6 +113,8 @@ export class ShadowProject {
   }
 }
 
-export function openShadow({ shadowRoot, projectId }) {
-  return new ShadowProject({ shadowRoot, projectId });
+export function openProject({ officialRoot, projectId }) {
+  return new ProjectTarget({ officialRoot, projectId });
 }
+
+export { AREA_PROJECT, AREA_LOCAL };

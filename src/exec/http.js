@@ -180,9 +180,10 @@ function buildQueryString(query, addEqual = true) {
 
 /* ---------------- Body 构造 ---------------- */
 
-function buildBody(apiBody, overrideBody, contentTypeHeader) {
+function buildBody(apiBody, overrideBody, contentTypeHeader, scope = null) {
   const body = apiBody || {};
   const mode = String(body.mode || 'none');
+  const sub = (value) => (scope ? renderTemplate(renderValue(value), scope) : renderValue(value));
 
   if (overrideBody !== undefined) {
     if (mode === 'none') {
@@ -198,7 +199,7 @@ function buildBody(apiBody, overrideBody, contentTypeHeader) {
       }
       const merged = [...(body.parameter || [])];
       const { applied, ignored } = mergeOverrides(merged, overrideBody);
-      return { ...buildBodyFromParams(merged, mode), applied, ignored };
+      return { ...buildBodyFromParams(merged, mode, sub), applied, ignored };
     }
     throw new Error(`请求体覆盖值与接口已定义的 Body 类型不匹配（mode=${mode}）`);
   }
@@ -207,12 +208,12 @@ function buildBody(apiBody, overrideBody, contentTypeHeader) {
   if (RAW_MODES.has(mode)) {
     return {
       mode,
-      text: String(body.raw ?? ''),
+      text: sub(body.raw ?? ''),
       contentType: contentTypeHeader || CONTENT_TYPE[mode] || 'text/plain'
     };
   }
   if (mode === 'graphql') {
-    const raw = String(body.raw || '').trim();
+    const raw = String(sub(body.raw ?? '')).trim();
     let payload;
     if (!raw) payload = JSON.stringify({ query: '' });
     else if (raw.startsWith('{')) payload = raw;
@@ -220,7 +221,7 @@ function buildBody(apiBody, overrideBody, contentTypeHeader) {
     return { mode, text: payload, contentType: 'application/json' };
   }
   if (mode === 'form-data' || mode === 'urlencoded') {
-    return buildBodyFromParams(body.parameter || [], mode);
+    return buildBodyFromParams(body.parameter || [], mode, sub);
   }
   if (mode === 'binary') {
     const bin = body.binary || {};
@@ -239,11 +240,11 @@ function buildBody(apiBody, overrideBody, contentTypeHeader) {
   return { mode, text: String(body.raw || ''), contentType: contentTypeHeader || 'text/plain' };
 }
 
-function buildBodyFromParams(paramList, mode) {
+function buildBodyFromParams(paramList, mode, sub = (v) => renderValue(v)) {
   if (mode === 'urlencoded') {
     const params = new URLSearchParams();
     for (const p of activeParams(paramList)) {
-      params.append(p.key, renderValue(p.value));
+      params.append(p.key, sub(p.value));
     }
     return { mode, text: params.toString(), contentType: CONTENT_TYPE[mode] };
   }
@@ -266,7 +267,7 @@ function buildBodyFromParams(paramList, mode) {
         );
       }
     } else {
-      chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${p.key}"\r\n\r\n${renderValue(p.value)}\r\n`));
+      chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${p.key}"\r\n\r\n${sub(p.value)}\r\n`));
     }
   }
   chunks.push(Buffer.from(`--${boundary}--\r\n`));
@@ -305,6 +306,10 @@ export async function executeRequest(opts) {
     globalVars = {},
     globalRuntime = {},
     globalParams = null,
+    /** 已合并「全局参数 → 目录 → 接口」的请求配置；不传则退化为接口自身定义 */
+    requestConfig = null,
+    /** 已解析好的前置 URL（含目录指定服务）；不传则用环境默认服务 */
+    baseUrlOverride = '',
     runBuiltinScripts = true,
     extraPreScript = '',
     extraPostScript = '',
@@ -325,22 +330,24 @@ export async function executeRequest(opts) {
 
   const method = String(apiDetail.method || 'GET').toUpperCase();
   const apiUrl = apiDetail.url || '';
-  const baseUrl = (env?.server_list || []).find((s) => String(s.server_id) === '1')?.uri || '';
+  const conf = requestConfig || apiDetail.request || {};
+  const baseUrl =
+    baseUrlOverride || (env?.server_list || []).find((s) => String(s.server_id) === '1')?.uri || '';
 
   // ---- 参数表（先做模板替换） ----
-  const queryParams = (apiDetail.request?.query?.parameter || []).map((p) => ({
+  const queryParams = (conf.query?.parameter || []).map((p) => ({
     ...p,
     value: renderTemplate(renderValue(p.value), scope)
   }));
-  const restfulParams = (apiDetail.request?.restful?.parameter || []).map((p) => ({
+  const restfulParams = (conf.restful?.parameter || []).map((p) => ({
     ...p,
     value: renderTemplate(renderValue(p.value), scope)
   }));
-  const headerParams = (apiDetail.request?.header?.parameter || []).map((p) => ({
+  const headerParams = (conf.header?.parameter || []).map((p) => ({
     ...p,
     value: renderTemplate(renderValue(p.value), scope)
   }));
-  const cookieParams = (apiDetail.request?.cookie?.parameter || []).map((p) => ({
+  const cookieParams = (conf.cookie?.parameter || []).map((p) => ({
     ...p,
     value: renderTemplate(renderValue(p.value), scope)
   }));
@@ -364,15 +371,16 @@ export async function executeRequest(opts) {
 
   // ---- 鉴权（配置里的值也要做模板替换，以便引用脚本写入的变量） ----
   const authConf = input.auth
-    ? { ...(apiDetail.request?.auth || {}), ...structuredClone(input.auth) }
-    : apiDetail.request?.auth;
+    ? { ...(conf.auth || {}), ...structuredClone(input.auth) }
+    : conf.auth;
   const renderedAuth = renderTemplate(authConf || { type: 'noauth' }, scope);
+  // 合并链路已把 inherit 解析成具体类型，globalParams.auth 仅作为旧调用方的兜底
   const renderedFallbackAuth = globalParams?.auth ? renderTemplate(globalParams.auth, scope) : null;
   const authResult = applyAuth(renderedAuth, renderedFallbackAuth);
   mergeAuthInto({ headers: request.headers, query: request.query }, authResult);
 
   // ---- Body ----
-  const builtBody = buildBody(apiDetail.request?.body, input.body, request.headers['Content-Type'] || request.headers['content-type']);
+  const builtBody = buildBody(conf.body, input.body, request.headers['Content-Type'] || request.headers['content-type'], scope);
   request.bodyMode = builtBody.mode;
   if (builtBody.buffer) {
     request.bodyBuffer = builtBody.buffer;
@@ -402,8 +410,10 @@ export async function executeRequest(opts) {
   const envInfo = { envName: env?.name || '', baseUrl };
 
   const preSources = [];
-  if (runBuiltinScripts) {
-    for (const s of collectScripts(apiDetail.request?.pre_tasks)) preSources.push(s.source);
+  for (const s of collectScripts(conf.pre_tasks)) {
+    // 流程执行时忽略接口自带脚本，但全局/目录脚本仍然执行
+    if (!runBuiltinScripts && (!s.origin || s.origin === 'api')) continue;
+    preSources.push(s.source);
   }
   if (extraPreScript && String(extraPreScript).trim()) preSources.push(String(extraPreScript));
 
@@ -449,7 +459,7 @@ export async function executeRequest(opts) {
     // URL 自带 query 与参数表合并（参数表优先覆盖同名键）
     const split = splitUrlQuery(resolved);
     const mergedQuery = { ...split.params, ...request.query };
-    finalUrl = split.base + buildQueryString(mergedQuery, apiDetail.request?.query?.query_add_equal !== 0);
+    finalUrl = split.base + buildQueryString(mergedQuery, conf.query?.query_add_equal !== 0);
     request.query = mergedQuery;
   } catch (err) {
     return finalize({
@@ -615,8 +625,10 @@ export async function executeRequest(opts) {
   // ---- 后置脚本 ----
   const postSources = [];
   if (extraPostScript && String(extraPostScript).trim()) postSources.push(String(extraPostScript));
-  if (runBuiltinScripts) {
-    for (const s of collectScripts(apiDetail.request?.post_tasks)) postSources.push(s.source);
+  for (const s of collectScripts(conf.post_tasks)) {
+    // 同上：流程里只跳过接口自带的脚本
+    if (!runBuiltinScripts && (!s.origin || s.origin === 'api')) continue;
+    postSources.push(s.source);
   }
 
   for (const source of postSources) {
@@ -636,7 +648,8 @@ export async function executeRequest(opts) {
   // ---- 结构校验（response.is_check_result + example[].expect） ----
   if (Number(apiDetail.response?.is_check_result) === 1) {
     const expect = pickExpect(apiDetail.response?.example);
-    if (expect?.schema && expect.verify_type === 'schema') {
+    const verifyType = String(expect?.verify_type || 'schema');
+    if (expect?.schema && verifyType === 'schema') {
       const errors = validateSchema(expect.schema, bodyJson ?? {});
       assertions.push({
         name: `响应结构校验（${expect.name || '成功'}）`,
@@ -645,7 +658,7 @@ export async function executeRequest(opts) {
         message: errors.length ? errors.map((e) => `${e.path}: ${e.message}`).join('; ') : undefined
       });
     }
-    if (expect?.code) {
+    if (expect?.code && verifyType !== 'none') {
       const codes = String(expect.code)
         .split(/[,\s|]+/)
         .filter(Boolean);
@@ -658,6 +671,23 @@ export async function executeRequest(opts) {
           message: passed ? undefined : `实际 ${response.status}`
         });
       }
+    }
+    // 响应头校验：expect.headers 里配置的每一条都要命中（值按包含比对）
+    if (expect?.headers && typeof expect.headers === 'object') {
+      const headerChecks = checkExpectedHeaders(expect.headers, responseHeaders);
+      assertions.push(...headerChecks);
+    }
+    // Content-Type 校验
+    if (expect?.content_type && String(expect.content_type).trim()) {
+      const wanted = String(expect.content_type).trim().toLowerCase();
+      const actual = String(responseHeaders['content-type'] || '').toLowerCase();
+      const passed = actual.includes(wanted);
+      assertions.push({
+        name: `Content-Type 校验（期望包含 ${wanted}）`,
+        passed,
+        phase: 'schema',
+        message: passed ? undefined : `实际 ${actual || '(空)'}`
+      });
     }
   }
 
@@ -690,6 +720,37 @@ function collectSetCookie(response) {
       if (single) out.push(...single.split(/,(?=[^;]+=)/));
     }
   } catch {}
+  return out;
+}
+
+/** 按 expect.headers 逐条校验响应头（值按包含比对，键不区分大小写） */
+export function checkExpectedHeaders(expected, actualHeaders) {
+  const out = [];
+  const actualLower = {};
+  for (const [k, v] of Object.entries(actualHeaders || {})) actualLower[String(k).toLowerCase()] = String(v);
+
+  for (const [rawKey, rawValue] of Object.entries(expected || {})) {
+    const key = String(rawKey || '').trim();
+    if (!key) continue;
+    const wanted = String(rawValue ?? '');
+    const actual = actualLower[key.toLowerCase()];
+    if (actual === undefined) {
+      out.push({
+        name: `响应头校验（${key}）`,
+        passed: false,
+        phase: 'header',
+        message: `缺少响应头 ${key}`
+      });
+      continue;
+    }
+    const passed = wanted === '' || actual.includes(wanted);
+    out.push({
+      name: `响应头校验（${key}）`,
+      passed,
+      phase: 'header',
+      message: passed ? undefined : `期望包含 ${wanted}，实际 ${actual}`
+    });
+  }
   return out;
 }
 
@@ -778,6 +839,29 @@ function finalize({
     live_binary: {
       body_base64: response?.body_base64 || null,
       too_large: Boolean(response?.too_large_for_base64)
+    },
+    // 仅即时返回用：未脱敏的完整请求 / 响应详情（不落盘，只给本地控制台）
+    live_detail: {
+      request: {
+        method: request.method,
+        url: request.url,
+        headers: request.headers,
+        query: request.query,
+        cookies: request.cookies,
+        body_mode: request.bodyMode,
+        body: truncate(request.bodyText, 200000)
+      },
+      response: response
+        ? {
+            status: response.status,
+            status_text: response.statusText,
+            protocol: response.protocol,
+            headers: response.headers,
+            set_cookies: response.setCookies || [],
+            size: response.size,
+            content_type: response.content_type || ''
+          }
+        : null
     }
   };
 }

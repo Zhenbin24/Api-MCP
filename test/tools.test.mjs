@@ -1,15 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { makeTempRoot, cleanup, makeContext } from './helpers.mjs';
-import { pullProject } from '../src/sync/index.js';
-import { openShadow } from '../src/store/shadow.js';
+import { openProject } from '../src/store/target.js';
 import { listApis, createApiOrFolder, readApiFile, TARGET_TYPE } from '../src/store/apis.js';
 import { callTool } from '../src/mcp/tools.js';
 
 async function setup() {
   const env = makeTempRoot();
-  pullProject(env.root, env.shadow, env.projectId);
-  const target = openShadow({ shadowRoot: env.shadow, projectId: env.projectId });
+  const target = openProject({ officialRoot: env.root, projectId: env.projectId });
   return { env, target, ctx: await makeContext(env) };
 }
 

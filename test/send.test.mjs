@@ -9,14 +9,14 @@ async function boot() {
   const fake = await startFakeServer();
   const config = {
     ...defaultConfig(),
+    enabled: true,
     token: 'test-token',
     ui_token: 'test-ui',
     port: 0,
     data_root: env.root,
-    shadow_root: env.shadow,
     allowed_project_ids: []
   };
-  const instance = createServer({ config, officialRoot: env.root, shadowRoot: env.shadow });
+  const instance = createServer({ config, officialRoot: env.root });
   const address = await instance.listen(0);
   const base = `http://127.0.0.1:${address.port}`;
   const headers = { 'X-UI-Token': 'test-ui', 'Content-Type': 'application/json' };
@@ -61,8 +61,8 @@ async function makeApi(req, env, fake, { name, method, path: apiPath, base = '{{
 
 async function pointEnvTo(req, env, fake) {
   // é»˜è®¤ç¯å¢ƒ id=1ï¼ˆrunner æœªæŒ‡å®š envId æ—¶ä¼šé€‰å®ƒï¼‰ï¼ŒæŠŠå®ƒçš„é»˜è®¤æœåŠ¡åœ°å€æŒ‡å‘ fake server
-  const { openShadow } = await import('../src/store/shadow.js');
-  const target = openShadow({ shadowRoot: env.shadow, projectId: env.projectId });
+  const { openProject } = await import('../src/store/target.js');
+  const target = openProject({ officialRoot: env.root, projectId: env.projectId });
 
   for (const envId of ['1', '2503d4840ac010']) {
     const file = target.readJson(`project/envs/${envId}.json`, null);
@@ -76,7 +76,6 @@ async function pointEnvTo(req, env, fake) {
 test('sendï¼šè¿”å›å®Œæ•´å“åº”ï¼ˆçŠ¶æ€ç /å¤´/ä½“/è€—æ—¶ï¼‰', async () => {
   const { env, fake, instance, req } = await boot();
   try {
-    await req('POST', `/api/projects/${env.projectId}/pull`, {});
     await pointEnvTo(req, env, fake);
 
     const id = await makeApi(req, env, fake, { name: 'ping', method: 'GET', path: '/users/42' });
@@ -109,7 +108,6 @@ test('sendï¼šè¿”å›å®Œæ•´å“åº”ï¼ˆçŠ¶æ€ç /å¤´/ä½“/è€—æ—¶ï¼‰', async () => {
 test('sendï¼šæ–­è¨€å¤±è´¥è¿”å› failed', async () => {
   const { env, fake, instance, req } = await boot();
   try {
-    await req('POST', `/api/projects/${env.projectId}/pull`, {});
     await pointEnvTo(req, env, fake);
 
     const api = await req('POST', `/api/projects/${env.projectId}/apis`, {
@@ -145,7 +143,6 @@ test('sendï¼šæ–­è¨€å¤±è´¥è¿”å› failed', async () => {
 test('sendï¼šé 2xx åˆ¤ failed ä½†ä»è¿”å›å“åº”ä½“', async () => {
   const { env, fake, instance, req } = await boot();
   try {
-    await req('POST', `/api/projects/${env.projectId}/pull`, {});
     await pointEnvTo(req, env, fake);
 
     const id = await makeApi(req, env, fake, { name: 'notfound', method: 'GET', path: '/nope' });
@@ -164,7 +161,6 @@ test('sendï¼šé 2xx åˆ¤ failed ä½†ä»è¿”å›å“åº”ä½“', async () => {
 test('sendï¼šæœªæ‰¾åˆ°æ¥å£è¿”å› 404', async () => {
   const { env, fake, instance, req } = await boot();
   try {
-    await req('POST', `/api/projects/${env.projectId}/pull`, {});
     const res = await req('POST', `/api/projects/${env.projectId}/apis/deadbeef123456/send`, {});
     assert.equal(res.status, 500);
     assert.match(String(res.data.error || ''), /æ¥å£ä¸å­˜åœ¨/);
@@ -175,12 +171,11 @@ test('sendï¼šæœªæ‰¾åˆ°æ¥å£è¿”å› 404', async () => {
   }
 });
 
-/* ---------------- ¶ş½øÖÆÏìÓ¦ ---------------- */
+/* ---------------- ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó¦ ---------------- */
 
-test('send£ºÎÄ±¾ÏìÓ¦´ø content_type / is_binary=false / body_base64', async () => {
+test('sendï¿½ï¿½ï¿½Ä±ï¿½ï¿½ï¿½Ó¦ï¿½ï¿½ content_type / is_binary=false / body_base64', async () => {
   const { env, fake, instance, req } = await boot();
   try {
-    await req('POST', `/api/projects/${env.projectId}/pull`, {});
     await pointEnvTo(req, env, fake);
     const id = await makeApi(req, env, fake, { name: 'ping', method: 'GET', path: '/users/42' });
 
@@ -188,9 +183,9 @@ test('send£ºÎÄ±¾ÏìÓ¦´ø content_type / is_binary=false / body_base64', async () =
     assert.equal(res.data.status, 'passed');
     assert.equal(res.data.is_binary, false);
     assert.match(String(res.data.content_type || ''), /json/);
-    assert.ok(res.data.body_base64, 'ÎÄ±¾ÏìÓ¦Ò²Ó¦´ø base64 ¹©±àÂëÇĞ»»');
+    assert.ok(res.data.body_base64, 'ï¿½Ä±ï¿½ï¿½ï¿½Ó¦Ò²Ó¦ï¿½ï¿½ base64 ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ğ»ï¿½');
 
-    // ½âÂë»ØÀ´Ó¦Óë body Ò»ÖÂ
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó¦ï¿½ï¿½ body Ò»ï¿½ï¿½
     const decoded = Buffer.from(res.data.body_base64, 'base64').toString('utf8');
     assert.match(decoded, /alice/);
   } finally {
@@ -200,26 +195,25 @@ test('send£ºÎÄ±¾ÏìÓ¦´ø content_type / is_binary=false / body_base64', async () =
   }
 });
 
-test('send£ºrun ¼ÇÂ¼²»º¬ body_base64£¨·ÀÖ¹ÀúÊ·ÅòÕÍ£©', async () => {
+test('sendï¿½ï¿½run ï¿½ï¿½Â¼ï¿½ï¿½ï¿½ï¿½ body_base64ï¿½ï¿½ï¿½ï¿½Ö¹ï¿½ï¿½Ê·ï¿½ï¿½ï¿½Í£ï¿½', async () => {
   const { env, fake, instance, req } = await boot();
   try {
-    await req('POST', `/api/projects/${env.projectId}/pull`, {});
     await pointEnvTo(req, env, fake);
     const id = await makeApi(req, env, fake, { name: 'ping', method: 'GET', path: '/users/42' });
 
     const res = await req('POST', `/api/projects/${env.projectId}/apis/${id}/send`, {});
-    assert.ok(res.data.body_base64, '¼´Ê±ÏìÓ¦Ó¦ÓĞ base64');
+    assert.ok(res.data.body_base64, 'ï¿½ï¿½Ê±ï¿½ï¿½Ó¦Ó¦ï¿½ï¿½ base64');
 
-    // ¶ÁÂäÅÌ¼ÇÂ¼£¬È·ÈÏÃ»ÓĞ base64
-    const { openShadow } = await import('../src/store/shadow.js');
+    // ï¿½ï¿½ï¿½ï¿½ï¿½Ì¼ï¿½Â¼ï¿½ï¿½È·ï¿½ï¿½Ã»ï¿½ï¿½ base64
+    const { openProject } = await import('../src/store/target.js');
     const { getRun } = await import('../src/store/runs.js');
-    const target = openShadow({ shadowRoot: env.shadow, projectId: env.projectId });
+    const target = openProject({ officialRoot: env.root, projectId: env.projectId });
     const run = getRun(target, res.data.run_id);
-    assert.ok(run, 'Ó¦ÄÜ¶Áµ½ run ¼ÇÂ¼');
+    assert.ok(run, 'Ó¦ï¿½Ü¶ï¿½ï¿½ï¿½ run ï¿½ï¿½Â¼');
     const step = run.steps[0];
 
     const serialized = JSON.stringify(step);
-    assert.equal(serialized.includes('body_base64'), false, 'run ¼ÇÂ¼²»Ó¦º¬ body_base64');
+    assert.equal(serialized.includes('body_base64'), false, 'run ï¿½ï¿½Â¼ï¿½ï¿½Ó¦ï¿½ï¿½ body_base64');
     assert.equal(step.response.has_binary, true);
     assert.equal(step.response.is_binary, false);
   } finally {
@@ -229,10 +223,9 @@ test('send£ºrun ¼ÇÂ¼²»º¬ body_base64£¨·ÀÖ¹ÀúÊ·ÅòÕÍ£©', async () => {
   }
 });
 
-test('send£ºMCP execute_api ·µ»ØÌå±£³Ö¾«¼ò£¨²»´ø base64£©', async () => {
+test('sendï¿½ï¿½MCP execute_api ï¿½ï¿½ï¿½ï¿½ï¿½å±£ï¿½Ö¾ï¿½ï¿½ò£¨²ï¿½ï¿½ï¿½ base64ï¿½ï¿½', async () => {
   const { env, fake, instance, req } = await boot();
   try {
-    await req('POST', `/api/projects/${env.projectId}/pull`, {});
     await pointEnvTo(req, env, fake);
     const id = await makeApi(req, env, fake, { name: 'ping', method: 'GET', path: '/users/42' });
 
@@ -242,7 +235,7 @@ test('send£ºMCP execute_api ·µ»ØÌå±£³Ö¾«¼ò£¨²»´ø base64£©', async () => {
     });
     assert.equal(res.data.ok, true);
     const result = res.data.result;
-    assert.equal(result.body_base64, undefined, 'MCP ¹¤¾ß²»Ó¦·µ»Ø base64');
+    assert.equal(result.body_base64, undefined, 'MCP ï¿½ï¿½ï¿½ß²ï¿½Ó¦ï¿½ï¿½ï¿½ï¿½ base64');
   } finally {
     await instance.close();
     await fake.close();
@@ -250,19 +243,18 @@ test('send£ºMCP execute_api ·µ»ØÌå±£³Ö¾«¼ò£¨²»´ø base64£©', async () => {
   }
 });
 
-test('send£ºÍ¼Æ¬ÏìÓ¦ is_binary=true ÇÒ´ø base64', async () => {
+test('sendï¿½ï¿½Í¼Æ¬ï¿½ï¿½Ó¦ is_binary=true ï¿½Ò´ï¿½ base64', async () => {
   const { env, fake, instance, req } = await boot();
   try {
-    await req('POST', `/api/projects/${env.projectId}/pull`, {});
     await pointEnvTo(req, env, fake);
     const id = await makeApi(req, env, fake, { name: 'img', method: 'GET', path: '/image' });
 
     const res = await req('POST', `/api/projects/${env.projectId}/apis/${id}/send`, {});
-    assert.equal(res.data.is_binary, true, 'Í¼Æ¬Ó¦ÅĞ¶¨Îª¶ş½øÖÆ');
+    assert.equal(res.data.is_binary, true, 'Í¼Æ¬Ó¦ï¿½Ğ¶ï¿½Îªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½');
     assert.match(String(res.data.content_type || ''), /^image\/png/);
-    assert.ok(res.data.body_base64, 'Ó¦´ø base64 ¹©Ô¤ÀÀ');
+    assert.ok(res.data.body_base64, 'Ó¦ï¿½ï¿½ base64 ï¿½ï¿½Ô¤ï¿½ï¿½');
 
-    // base64 ½â³öÀ´Ó¦ÊÇ PNG Ä§Êı
+    // base64 ï¿½ï¿½ï¿½ï¿½ï¿½Ó¦ï¿½ï¿½ PNG Ä§ï¿½ï¿½
     const buf = Buffer.from(res.data.body_base64, 'base64');
     assert.equal(buf[0], 0x89);
     assert.equal(buf.toString('ascii', 1, 4), 'PNG');
@@ -273,17 +265,128 @@ test('send£ºÍ¼Æ¬ÏìÓ¦ is_binary=true ÇÒ´ø base64', async () => {
   }
 });
 
-test('send£º³¬´óÏìÓ¦²»¸½´ø base64', async () => {
+test('sendï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó¦ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ base64', async () => {
   const { env, fake, instance, req } = await boot();
   try {
-    await req('POST', `/api/projects/${env.projectId}/pull`, {});
     await pointEnvTo(req, env, fake);
     const id = await makeApi(req, env, fake, { name: 'big', method: 'GET', path: '/bigtext' });
 
     const res = await req('POST', `/api/projects/${env.projectId}/apis/${id}/send`, {});
-    assert.equal(res.data.body_base64, null, '³¬¹ı 4MB ²»Ó¦´ø base64');
+    assert.equal(res.data.body_base64, null, 'ï¿½ï¿½ï¿½ï¿½ 4MB ï¿½ï¿½Ó¦ï¿½ï¿½ base64');
     assert.equal(res.data.too_large_for_base64, true);
     assert.ok(res.data.response.size > 4 * 1024 * 1024);
+  } finally {
+    await instance.close();
+    await fake.close();
+    cleanup(env.base);
+  }
+});
+
+/* ---------------- live_detailï¼ˆæœªè„±æ•ï¼Œä»…æœ¬åœ°å³æ—¶è¿”å›ï¼‰ ---------------- */
+
+test('sendï¼šlive_detail è¿”å›æœªè„±æ•çš„è¯·æ±‚å¤´ä¸ Set-Cookie', async () => {
+  const { env, fake, instance, req } = await boot();
+  try {
+    await pointEnvTo(req, env, fake);
+
+    const api = await req('POST', `/api/projects/${env.projectId}/apis`, {
+      name: 'login',
+      target_type: 'api',
+      method: 'POST',
+      url: '{{base}}/login'
+    });
+    const id = api.data.target_id;
+
+    const detail = await req('GET', `/api/projects/${env.projectId}/apis/${id}`);
+    const data = detail.data.data;
+    data.request.body = { mode: 'json', raw: '{"username":"admin"}', parameter: [], raw_parameter: [] };
+    data.request.header = {
+      parameter: [
+        { key: 'Authorization', value: 'Bearer super-secret', is_checked: 1, field_type: 'String', param_id: 'h1' },
+        { key: 'X-Custom', value: 'visible', is_checked: 1, field_type: 'String', param_id: 'h2' }
+      ]
+    };
+    await req('PUT', `/api/projects/${env.projectId}/apis/${id}`, { data });
+
+    const res = await req('POST', `/api/projects/${env.projectId}/apis/${id}/send`, {});
+    assert.equal(res.status, 200);
+
+    // æœªè„±æ•ï¼šå®Œæ•´è¯·æ±‚å¤´
+    assert.ok(res.data.live_detail, 'åº”è¿”å› live_detail');
+    const liveReq = res.data.live_detail.request;
+    assert.equal(liveReq.headers.Authorization, 'Bearer super-secret', 'live_detail é‡Œçš„ Authorization ä¸åº”è„±æ•');
+    assert.equal(liveReq.headers['X-Custom'], 'visible');
+    assert.match(liveReq.url, /\/login/);
+    assert.equal(liveReq.method, 'POST');
+    assert.match(String(liveReq.body || ''), /admin/);
+
+    // å“åº”ä¾§ Set-Cookie
+    const liveResp = res.data.live_detail.response;
+    assert.ok(liveResp, 'åº”è¿”å›å“åº”è¯¦æƒ…');
+    assert.ok(liveResp.protocol, 'åº”å¸¦åè®®');
+    assert.ok(Array.isArray(liveResp.set_cookies), 'set_cookies åº”ä¸ºæ•°ç»„');
+    assert.ok(liveResp.set_cookies.length > 0, 'ç™»å½•æ¥å£åº”ä¸‹å‘ Set-Cookie');
+    assert.match(liveResp.set_cookies[0], /session=/);
+
+    // è„±æ•å­—æ®µä¿ç•™ï¼ˆæ‰§è¡Œå†å²ä¾èµ–ï¼‰
+    assert.equal(res.data.request.headers.Authorization, '***');
+  } finally {
+    await instance.close();
+    await fake.close();
+    cleanup(env.base);
+  }
+});
+
+test('sendï¼šè½ç›˜ run ä»è„±æ•ä¸”ä¸å« live_detail', async () => {
+  const { env, fake, instance, req } = await boot();
+  try {
+    await pointEnvTo(req, env, fake);
+
+    const api = await req('POST', `/api/projects/${env.projectId}/apis`, {
+      name: 'me',
+      target_type: 'api',
+      method: 'GET',
+      url: '{{base}}/users/42'
+    });
+    const id = api.data.target_id;
+    const detail = await req('GET', `/api/projects/${env.projectId}/apis/${id}`);
+    const data = detail.data.data;
+    data.request.header = {
+      parameter: [
+        { key: 'Authorization', value: 'Bearer hidden', is_checked: 1, field_type: 'String', param_id: 'h1' }
+      ]
+    };
+    await req('PUT', `/api/projects/${env.projectId}/apis/${id}`, { data });
+
+    const res = await req('POST', `/api/projects/${env.projectId}/apis/${id}/send`, {});
+    assert.ok(res.data.live_detail, 'å³æ—¶è¿”å›åº”æœ‰ live_detail');
+
+    const { openProject } = await import('../src/store/target.js');
+    const { getRun } = await import('../src/store/runs.js');
+    const target = openProject({ officialRoot: env.root, projectId: env.projectId });
+    const run = getRun(target, res.data.run_id);
+    assert.ok(run, 'åº”èƒ½è¯»åˆ° run');
+    assert.equal(run.steps[0].request.headers.Authorization, '***', 'è½ç›˜è®°å½•å¿…é¡»è„±æ•');
+    assert.equal(JSON.stringify(run.steps[0]).includes('live_detail'), false, 'è½ç›˜è®°å½•ä¸åº”å« live_detail');
+  } finally {
+    await instance.close();
+    await fake.close();
+    cleanup(env.base);
+  }
+});
+
+test('MCP execute_api ä¸è¿”å› live_detail', async () => {
+  const { env, fake, instance, req } = await boot();
+  try {
+    await pointEnvTo(req, env, fake);
+    const id = await makeApi(req, env, fake, { name: 'ping', method: 'GET', path: '/users/42' });
+
+    const res = await req('POST', `/api/tools/call`, {
+      name: 'apipost_execute_api',
+      arguments: { project_id: env.projectId, target_id: id }
+    });
+    assert.equal(res.data.ok, true);
+    assert.equal(res.data.result.live_detail, undefined, 'MCP å·¥å…·ä¸åº”è¿”å› live_detail');
   } finally {
     await instance.close();
     await fake.close();

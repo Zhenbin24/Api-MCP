@@ -8,11 +8,10 @@ import path from 'node:path';
 export function makeTempRoot() {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'apipost-mcp-test-'));
   const root = path.join(base, 'Apipost单机版');
-  const shadow = path.join(base, 'workspace');
 
-  // 隔离本软件自身配置，避免测试写到真实 %APPDATA%\ApiPostMCP
-  process.env.APIPOST_MCP_HOME = path.join(base, 'mcp-home');
-  fs.mkdirSync(process.env.APIPOST_MCP_HOME, { recursive: true });
+  // 隔离本软件自身配置，避免测试写到真实 %APPDATA%\ApiMCP
+  process.env.APIMCP_HOME = path.join(base, 'mcp-home');
+  fs.mkdirSync(process.env.APIMCP_HOME, { recursive: true });
 
   const projectId = '2503d482bac003';
   const teamId = '2503d483fac004';
@@ -25,7 +24,6 @@ export function makeTempRoot() {
   };
 
   fs.mkdirSync(root, { recursive: true });
-  fs.mkdirSync(shadow, { recursive: true });
 
   write('offline-projects.json', [{ project_id: projectId, path: path.join(root, 'offline-data', projectId), created_at: now }]);
   write('offline-data-local/meta.json', {
@@ -91,7 +89,7 @@ export function makeTempRoot() {
   write(`${pdir}/executions/flows/index.json`, { version: 2, updated_at: now, records: [] });
   write(`${pdir}/executions/runs/index.json`, { version: 2, updated_at: now, records: [] });
 
-  return { base, root, shadow, projectId, teamId };
+  return { base, root, projectId, teamId };
 }
 
 export function cleanup(base) {
@@ -100,11 +98,10 @@ export function cleanup(base) {
   } catch {}
 }
 
-export async function makeContext({ root, shadow }, overrides = {}) {
+export async function makeContext({ root }, overrides = {}) {
   const { ToolContext } = await import('../src/mcp/tools.js');
   return new ToolContext({
     officialRoot: root,
-    shadowRoot: shadow,
     config: {
       enabled: true,
       allowed_project_ids: [],

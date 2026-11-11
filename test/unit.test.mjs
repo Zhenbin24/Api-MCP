@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createVariableScope, renderTemplate, hasTemplate } from '../src/exec/template.js';
 import { applyAuth, isAuthSupported } from '../src/exec/auth.js';
 import { validateSchema, schemaToSample } from '../src/exec/assert.js';
+import { checkExpectedHeaders } from '../src/exec/http.js';
 import { parseOpenApi } from '../src/openapi/convert.js';
 
 test('模板：优先级 环境运行时 > 环境默认 > 全局运行时 > 全局默认', () => {
@@ -194,4 +195,26 @@ test('OpenAPI：$ref 解析', () => {
   assert.equal(schema.type, 'object');
   assert.equal(schema.properties.id.type, 'integer');
   assert.deepEqual(schema.required, ['id']);
+});
+
+test('响应头校验：命中 / 缺失 / 值不一致', () => {
+  const headers = { 'content-type': 'application/json; charset=utf-8', 'X-Trace': 'abc-123' };
+
+  const ok = checkExpectedHeaders({ 'Content-Type': 'json' }, headers);
+  assert.equal(ok.length, 1);
+  assert.equal(ok[0].passed, true, '键名不区分大小写，值按包含比对');
+
+  const missing = checkExpectedHeaders({ 'X-Absent': 'x' }, headers);
+  assert.equal(missing[0].passed, false);
+  assert.match(missing[0].message, /缺少响应头/);
+
+  const mismatch = checkExpectedHeaders({ 'X-Trace': 'zzz' }, headers);
+  assert.equal(mismatch[0].passed, false);
+  assert.match(mismatch[0].message, /期望包含 zzz/);
+
+  const emptyValue = checkExpectedHeaders({ 'X-Trace': '' }, headers);
+  assert.equal(emptyValue[0].passed, true, '空期望值只校验存在性');
+
+  assert.deepEqual(checkExpectedHeaders({}, headers), []);
+  assert.deepEqual(checkExpectedHeaders({ '  ': 'x' }, headers), [], '空键名跳过');
 });

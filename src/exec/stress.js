@@ -6,7 +6,8 @@
  * 注意：压测时执行接口的断言与脚本（可按需关闭），会消耗 CPU 影响吞吐。
  */
 import { executeRequest, createCookieJar } from './http.js';
-import { openShadow } from '../store/shadow.js';
+import { buildEffectiveRequest } from './inherit.js';
+import { openProject } from '../store/target.js';
 import { findApiItem, ensureApiFile, TARGET_TYPE } from '../store/apis.js';
 import { listEnvironments, readEnvVarsHistory, readGlobalVars, readGlobalVarsHistory, assertEnv } from '../store/envs.js';
 import { resolveEnvironment } from './runner.js';
@@ -68,7 +69,7 @@ export function summarize(timings, failures, statusCodes, totalElapsedMs) {
 /**
  * 执行压测。
  * @param {object} opts
- * @param {string} opts.shadowRoot
+ * @param {string} opts.officialRoot
  * @param {string} opts.projectId
  * @param {string} opts.targetId
  * @param {number} opts.concurrency   并发数（>=1）
@@ -81,7 +82,7 @@ export function summarize(timings, failures, statusCodes, totalElapsedMs) {
  */
 export async function runStress(opts) {
   const {
-    shadowRoot,
+    officialRoot,
     projectId,
     targetId,
     concurrency = 1,
@@ -93,7 +94,7 @@ export async function runStress(opts) {
     onProgress = null
   } = opts;
 
-  const target = openShadow({ shadowRoot, projectId });
+  const target = openProject({ officialRoot, projectId });
   const item = findApiItem(target, targetId);
   if (!item) throw new Error(`接口不存在：${targetId}`);
   if (item.target_type !== TARGET_TYPE.API) {
@@ -106,6 +107,8 @@ export async function runStress(opts) {
 
   const env = pickEnv(target, envId);
   const baseCtx = contextOf(target, env);
+  // 压测同样走「全局参数 → 目录 → 接口」继承链
+  const effective = buildEffectiveRequest(target, apiDetail, env);
 
   const conc = Math.max(1, Math.min(200, Number(concurrency) || 1));
   const totalRounds = mode === 'rounds' ? Math.max(1, Number(rounds) || 1) : 0;
@@ -128,6 +131,8 @@ export async function runStress(opts) {
       env,
       ...baseCtx,
       globalParams: target.readJson(target.p('global_params.json'), null),
+      requestConfig: effective.request,
+      baseUrlOverride: effective.baseUrl,
       runBuiltinScripts: runAssertions,
       cookieJar: createCookieJar(),
       timeoutMs: DEFAULT_TIMEOUT_MS
@@ -141,7 +146,7 @@ export async function runStress(opts) {
     } else {
       failures += 1;
       if (result.assertions?.some((a) => a.passed === false)) assertionFailed += 1;
-      if (errorSamples.length < 5 && result.error) errorSamples.push(result.error);
+      if (errorSamples.length < 20 && result.error) errorSamples.push(result.error);
     }
   };
 
@@ -159,7 +164,7 @@ export async function runStress(opts) {
         await doOne();
       } catch (err) {
         failures += 1;
-        if (errorSamples.length < 5) errorSamples.push(err.message || String(err));
+        if (errorSamples.length < 20) errorSamples.push(err.message || String(err));
       }
       if (typeof onProgress === 'function') onProgress(started, mode === 'rounds' ? totalRounds : 0);
     }

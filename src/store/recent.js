@@ -3,7 +3,7 @@ import { readApiIndex } from './apis.js';
 import { readRunsIndex } from './runs.js';
 
 /**
- * 最近保存：按影子工作区里 apis/*.json 的文件 mtime 倒序。
+ * 最近保存：按工作区里 apis/*.json 的文件 mtime 倒序。
  * 与 API 索引合并，拿到名称/方法/URL。
  */
 export function listRecentlySaved(target, { limit = 50, keyword = '' } = {}) {

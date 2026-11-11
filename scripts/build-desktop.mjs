@@ -2,7 +2,7 @@
 /**
  * 构建桌面端：esbuild 打包主进程 -> @electron/packager 产出绿色版目录
  *
- * 产物：dist/desktop/ApiPostMCP-Desktop-win32-x64/ApiPostMCP-Desktop.exe
+ * 产物：dist/desktop/ApiMCP-Desktop-win32-x64/ApiMCP-Desktop.exe
  *
  * 用法：
  *   node scripts/build-desktop.mjs                完整构建（需要 Electron 二进制）
@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const distDesktop = path.join(root, 'dist', 'desktop');
 const appDir = path.join(distDesktop, 'app');
-const APP_NAME = 'ApiPostMCP-Desktop';
+const APP_NAME = 'ApiMCP-Desktop';
 const APP_VERSION = '1.0.0';
 
 const log = (msg) => console.log(`[desktop] ${msg}`);
@@ -83,7 +83,7 @@ async function bundle() {
     path.join(appDir, 'package.json'),
     `${JSON.stringify(
       {
-        name: 'apipost-mcp-desktop',
+        name: 'apimcp-desktop',
         productName: 'API MCP 控制台',
         version: APP_VERSION,
         description: 'API MCP 控制台桌面端',
@@ -113,28 +113,44 @@ function readmeText() {
 
 双击 ${APP_NAME}.exe 即可打开独立窗口（无地址栏、无标签页）。
 
-一、它和 apipost-mcp.exe 的关系
-------------------------------
+分发：必须把整个 ApiMCP-Desktop-win32-x64 目录一起拷贝（约 350MB），
+只拿一个 exe 会打不开——Electron 运行时在同目录的 dll 和 locales 里。
+
+一、它和 apimcp.exe 的关系
+--------------------------
 - 本桌面端自带服务，双击即用，窗口关闭时服务一起退出。
-- 如果 apipost-mcp.exe 已经在跑（端口 39100 被占用且 ui_token 一致），
+- 如果 apimcp.exe 已经在跑（端口 39100 被占用且 ui_token 一致），
   桌面端会「附着」到已有服务，只开窗口，关闭窗口不影响那边的服务。
 - 端口被其它程序占用时会弹窗提示，可用 --port 指定其它端口。
 
-二、数据位置（与 apipost-mcp.exe 完全一致）
-------------------------------------------
-官方数据（只读）：%APPDATA%\\Apipost单机版\\
-影子工作区：      %APPDATA%\\ApiPostMCP\\workspace\\
-本软件配置：      %APPDATA%\\ApiPostMCP\\config.json
-窗口位置记忆：    %APPDATA%\\ApiPostMCP\\desktop-window.json
+二、首次使用建议顺序
+--------------------
+1) 先安装并打开一次 API 单机版（Apipost 离线版）。
+2) 双击 ${APP_NAME}.exe，窗口直接打开控制台。
+3) 「总览」把「运行状态」开关打开（服务默认关闭，关闭时
+   HTTP 与 stdio 都会被拒绝，只影响接入、不影响控制台本身）。
+4) 确认数据目录探测成功，并勾选要开放给 MCP 的项目。
+5) 改完接口保存即写入 API 单机版，重新进入项目即可看到。
 
-三、命令行参数
+三、数据位置（与 apimcp.exe 完全一致）
+--------------------------------------
+官方数据（读写）：%APPDATA%\\Apipost单机版\\
+本软件配置：      %APPDATA%\\ApiMCP\\config.json
+窗口位置记忆：    %APPDATA%\\ApiMCP\\desktop-window.json
+
+四、命令行参数
 --------------
   ${APP_NAME}.exe                     启动服务 + 打开控制台窗口
   ${APP_NAME}.exe --port 39101        换端口
   ${APP_NAME}.exe --data-root "D:\\\\data"   指定 Apipost 数据目录
-  ${APP_NAME}.exe --shadow-root "D:\\\\sh"   指定影子目录
 
-四、开发调试
+五、配到 AI 客户端
+------------------
+控制台左侧「客户端配置」→ 选客户端 → 复制 → 粘贴，不用手写。
+注意那里给的是 apimcp.exe --stdio 的形式（由客户端自己拉起进程），
+不需要先双击本桌面端。
+
+六、开发调试
 ------------
   set APIPOST_MCP_DEV=1
   ${APP_NAME}.exe        # 允许 F12 / Ctrl+Shift+I 打开开发者工具

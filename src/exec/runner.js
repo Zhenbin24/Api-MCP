@@ -1,22 +1,23 @@
-import { openShadow } from '../store/shadow.js';
+import { openProject } from '../store/target.js';
 import { findApiItem, readApiFile, ensureApiFile, TARGET_TYPE } from '../store/apis.js';
-import { assertEnv, readEnvVarsHistory, readGlobalVars, readGlobalVarsHistory, listEnvironments, envBaseUrl } from '../store/envs.js';
-import { readGlobalParams } from '../store/projects.js';
+import {
+  assertEnv,
+  readEnvVarsHistory,
+  readGlobalVars,
+  readGlobalVarsHistory,
+  listEnvironments,
+  envBaseUrl,
+  resolveCurrentEnv
+} from '../store/envs.js';
 import { assertFlow } from '../store/flows.js';
 import { newRunId, saveRun } from '../store/runs.js';
+import { buildEffectiveRequest } from './inherit.js';
 import { executeRequest, createCookieJar } from './http.js';
 import { stepId as makeStepId } from '../util/ids.js';
 
-/** 当前环境：显式指定 > 官方记忆的偏好环境 > 第一个环境 */
+/** 当前环境：显式指定 > 项目记录的当前环境 > 配置的偏好环境 > 默认环境 > 第一个 */
 export function resolveEnvironment(target, { envId, preferredEnvId } = {}) {
-  const envs = listEnvironments(target);
-  if (envs.length === 0) throw new Error('项目还没有任何环境，请先用 apipost_create_environment 创建');
-  if (envId) return assertEnv(target, envId);
-  const pick =
-    envs.find((e) => e.env_id === preferredEnvId) ||
-    envs.find((e) => String(e.env_id) === '1') ||
-    envs[0];
-  return pick;
+  return resolveCurrentEnv(target, { envId, preferredEnvId });
 }
 
 function envContext(target, env) {
@@ -31,7 +32,7 @@ function envContext(target, env) {
 
 /** 单接口执行 */
 export async function runApi({
-  shadowRoot,
+  officialRoot,
   projectId,
   targetId,
   input = {},
@@ -41,9 +42,11 @@ export async function runApi({
   fetchImpl,
   timeoutMs,
   /** 仅控制台「发送」需要：把二进制原始字节一并带回（不落盘） */
-  includeBinary = false
+  includeBinary = false,
+  /** 仅控制台「发送」需要：带回未脱敏的完整请求 / 响应详情（不落盘） */
+  includeLiveDetail = false
 }) {
-  const target = openShadow({ shadowRoot, projectId });
+  const target = openProject({ officialRoot, projectId });
   const item = findApiItem(target, targetId);
   if (!item) throw new Error(`接口不存在：${targetId}`);
   if (item.target_type !== TARGET_TYPE.API) {
@@ -57,7 +60,8 @@ export async function runApi({
 
   const env = resolveEnvironment(target, { envId, preferredEnvId });
   const ctx = envContext(target, env);
-  const globalParams = shadowGlobalParams(target);
+  const globalParams = readGlobalParamsOf(target);
+  const effective = buildEffectiveRequest(target, apiDetail, env);
 
   const result = await executeRequest({
     apiDetail,
@@ -65,6 +69,8 @@ export async function runApi({
     env,
     ...ctx,
     globalParams,
+    requestConfig: effective.request,
+    baseUrlOverride: effective.baseUrl,
     runBuiltinScripts: true,
     cookieJar: createCookieJar(),
     fetchImpl,
@@ -133,12 +139,16 @@ export async function runApi({
     summary.too_large_for_base64 = Boolean(result.live_binary?.too_large);
   }
 
+  if (includeLiveDetail) {
+    summary.live_detail = result.live_detail || null;
+  }
+
   return summary;
 }
 
 /** 执行计划 */
 export async function runFlow({
-  shadowRoot,
+  officialRoot,
   projectId,
   flowId,
   envId,
@@ -147,11 +157,11 @@ export async function runFlow({
   fetchImpl,
   timeoutMs
 }) {
-  const target = openShadow({ shadowRoot, projectId });
+  const target = openProject({ officialRoot, projectId });
   const flow = assertFlow(target, flowId);
   const env = resolveEnvironment(target, { envId: envId || flow.environment_id, preferredEnvId });
   const ctx = envContext(target, env);
-  const globalParams = shadowGlobalParams(target);
+  const globalParams = readGlobalParamsOf(target);
   const cookieJar = createCookieJar();
 
   const startedAt = new Date().toISOString();
@@ -174,13 +184,17 @@ export async function runFlow({
       break;
     }
 
+    // 步骤按自己的接口快照走同一条继承链（全局参数 → 目录 → 接口）
+    const stepEffective = buildEffectiveRequest(target, snapshot, env);
     const result = await executeRequest({
       apiDetail: snapshot,
       input: step.input || {},
       env,
       ...ctx,
       globalParams,
-      runBuiltinScripts: false, // 流程忽略接口自带脚本
+      requestConfig: stepEffective.request,
+      baseUrlOverride: stepEffective.baseUrl,
+      runBuiltinScripts: false, // 流程忽略接口自带脚本（全局/目录脚本仍会执行）
       extraPreScript: step.pre_script || '',
       extraPostScript: step.post_script || '',
       cookieJar,
@@ -264,11 +278,7 @@ export async function runFlow({
   };
 }
 
-function shadowProjectRootForParams(target) {
-  return target.shadowRoot;
-}
-
-function shadowGlobalParams(target) {
+function readGlobalParamsOf(target) {
   const params = target.readJson(target.p('global_params.json'), null);
   if (!params) return null;
   return params;
@@ -288,7 +298,7 @@ function mergeWrites(ctx, env, writes) {
   }
 }
 
-/** 把脚本里 apt.environment.set / apt.globals.set 的值持久化到影子（运行时值） */
+/** 把脚本里 apt.environment.set / apt.globals.set 的值持久化到工作区（运行时值） */
 function persistVariableWrites(target, env, writes) {
   if (!writes) return;
   const envWrites = writes.environment || {};

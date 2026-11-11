@@ -216,35 +216,73 @@ const editor = {
   tree: [],
   selectedId: null,
   data: null,
-  dirty: false,
+  // 三个独立数据域各自的未保存状态，互不影响
+  dirty: false, // design 域（基础/参数/Body/鉴权/脚本/响应）
+  caseDirty: false, // case 域（data.cases）
+  mockDirty: false, // mock 域（data.mock）
   activeTab: 'basic',
   activeMode: 'design',
+  /** 目录编辑器的子页签（基础 / 参数 / Body / 鉴权 / 脚本） */
+  folderTab: 'basic',
   debugTab: 'body',
   // 响应体查看状态
   debugView: 'pretty',
   debugFormat: 'auto',
   debugEncoding: 'utf-8',
+  // 调试面板「隐藏敏感值」开关，默认关闭（本地调试优先看全）
+  debugMask: false,
   apiIndex: []
 };
 
-function resetDirty() {
-  editor.dirty = false;
+const DIRTY_LABELS = { design: '未保存', case: '用例未保存', mock: 'Mock 未保存' };
+
+function resetDirty(scope = 'design') {
+  markClean(scope);
+}
+
+function markDirty(scope = 'design') {
+  const key = scope === 'case' ? 'caseDirty' : scope === 'mock' ? 'mockDirty' : 'dirty';
+  if (editor[key]) return;
+  editor[key] = true;
   syncDirtyBadge();
 }
 
-function markDirty() {
-  if (editor.dirty) return;
-  editor.dirty = true;
+function markClean(scope = 'design') {
+  const key = scope === 'case' ? 'caseDirty' : scope === 'mock' ? 'mockDirty' : 'dirty';
+  if (!editor[key]) return;
+  editor[key] = false;
   syncDirtyBadge();
+}
+
+/** 丢弃所有未保存改动（切换接口 / 离开页面时用） */
+function discardUnsaved() {
+  editor.dirty = false;
+  editor.caseDirty = false;
+  editor.mockDirty = false;
+  syncDirtyBadge();
+}
+
+function hasUnsaved() {
+  return Boolean(editor.dirty || editor.caseDirty || editor.mockDirty);
+}
+
+function isDirty(scope = 'design') {
+  if (scope === 'case') return Boolean(editor.caseDirty);
+  if (scope === 'mock') return Boolean(editor.mockDirty);
+  return Boolean(editor.dirty);
 }
 
 /** 只更新工具条上的「未保存」徽标，避免整树重绘导致输入框失焦 */
 function syncDirtyBadge() {
   const badge = document.getElementById('dirty-badge');
   if (!badge) return;
-  if (editor.dirty) {
+  const parts = [];
+  if (editor.dirty) parts.push(DIRTY_LABELS.design);
+  if (editor.caseDirty) parts.push(DIRTY_LABELS.case);
+  if (editor.mockDirty) parts.push(DIRTY_LABELS.mock);
+  if (parts.length > 0) {
     badge.className = 'tag warn';
-    badge.textContent = '未保存';
+    badge.textContent = parts.join(' · ');
     badge.style.display = '';
   } else {
     badge.style.display = 'none';
@@ -261,20 +299,31 @@ async function loadTree(projectId) {
   return res;
 }
 
-async function loadApi(projectId, targetId) {
+async function loadApi(projectId, targetId, { keepAux = false } = {}) {
   const res = await api.get(`/projects/${projectId}/apis/${targetId}`);
   editor.data = deepClone(res.data);
   editor.selectedId = targetId;
   editor.targetType = res.target_type;
   editor.indexMeta = res.index;
+  editor.folderTab = 'basic';
   // 状态定义按项目缓存，切换项目时重取
   if (!marksCache || marksCache.projectId !== projectId) {
     await loadMarks(projectId);
   }
-  // 切换接口时重置面板缓存
-  window.ApiExtra?.resetCases?.();
-  window.ApiExtra?.resetMock?.();
-  resetDirty();
+  // 目录页签需要服务列表（用于选择前置 URL）
+  if (res.target_type === 'folder') {
+    await loadFolderServers();
+  }
+  // 切换接口时重置面板缓存；同接口重载（保存后刷新）保留附属域的草稿与脏标记
+  if (!keepAux) {
+    window.ApiExtra?.resetCases?.();
+    window.ApiExtra?.resetMock?.();
+    window.ApiExtra?.resetStress?.();
+    editor.caseDirty = false;
+    editor.mockDirty = false;
+  }
+  resetDirty('design');
+  syncDirtyBadge();
   return res;
 }
 
@@ -730,19 +779,7 @@ function tabBasic() {
 
 /* ---------------- 页签：参数 ---------------- */
 
-function tabParams() {
-  const req = editor.data.request;
-  return h(
-    'div',
-    { class: 'param-sections' },
-    paramSection('Query 参数', req.query, 'query'),
-    paramSection('Path 参数', req.restful, 'restful'),
-    paramSection('Header 参数', req.header, 'header'),
-    paramSection('Cookie 参数', req.cookie, 'cookie')
-  );
-}
-
-function paramSection(title, holder, key) {
+function paramSection(title, holder, key, onChange = markDirty) {
   if (!holder) return null;
   if (!Array.isArray(holder.parameter)) holder.parameter = [];
   return h(
@@ -751,15 +788,38 @@ function paramSection(title, holder, key) {
     h('div', { class: 'param-section-title' }, title, h('span', { class: 'tab-badge' }, holder.parameter.length)),
     paramTable(holder.parameter, (next) => {
       holder.parameter = next;
-      markDirty();
+      onChange();
     })
   );
 }
 
+/**
+ * 参数页签：接口编辑器与全局参数/目录参数共用。
+ * @param {object} request 目标 request 配置
+ * @param {function} onChange 变更回调
+ * @param {{sections?: string[]}} opts 只显示指定小节
+ */
+function tabParams(request = editor.data.request, onChange = markDirty, opts = {}) {
+  const req = request;
+  const sections = opts.sections || ['query', 'restful', 'header', 'cookie'];
+  const parts = [];
+  if (sections.includes('query')) parts.push(paramSection('Query 参数', req.query, 'query', onChange));
+  if (sections.includes('restful')) parts.push(paramSection('Path 参数', req.restful, 'restful', onChange));
+  if (sections.includes('header')) parts.push(paramSection('Header 参数', req.header, 'header', onChange));
+  if (sections.includes('cookie')) parts.push(paramSection('Cookie 参数', req.cookie, 'cookie', onChange));
+  return h('div', { class: 'param-sections' }, ...parts.filter(Boolean));
+}
+
 /* ---------------- 页签：Body ---------------- */
 
-function tabBody() {
-  const body = editor.data.request.body;
+/**
+ * Body 页签：接口编辑器 / 全局参数 / 目录参数共用。
+ * @param {object} body Body 配置对象（会被原地修改）
+ * @param {function} onChange 变更回调
+ * @param {{allowedModes?: string[][]}} opts 限定可选模式（全局/目录参数只允许 none / form-data / urlencoded）
+ */
+function tabBody(body = editor.data.request.body, onChange = markDirty, opts = {}) {
+  const modes = opts.allowedModes || BODY_MODES;
   const mode = String(body.mode || 'none');
   const isRaw = ['json', 'raw', 'xml', 'html', 'javascript', 'plain'].includes(mode);
   const isForm = ['form-data', 'urlencoded'].includes(mode);
@@ -779,11 +839,12 @@ function tabBody() {
     { class: 'form-grid' },
     field(
       'Body 类型',
-      select(BODY_MODES, mode, (v) => {
+      select(modes, mode, (v) => {
         body.mode = v;
         if (['form-data', 'urlencoded'].includes(v) && !Array.isArray(body.parameter)) body.parameter = [];
-        markDirty();
-        rerenderPane();
+        onChange();
+        if (opts.rerender !== false) rerenderPane();
+        opts.onModeChange?.();
       })
     ),
     isRaw
@@ -798,7 +859,7 @@ function tabBody() {
               body.raw || '',
               (v) => {
                 body.raw = v;
-                markDirty();
+                onChange();
                 if (mode === 'json') updateJsonHint(v);
               },
               { rows: 14, placeholder: mode === 'json' ? '{\n  "key": "value"\n}' : '' }
@@ -819,7 +880,7 @@ function tabBody() {
               Array.isArray(body.parameter) ? body.parameter : [],
               (next) => {
                 body.parameter = next;
-                markDirty();
+                onChange();
               },
               { withFileType: true }
             )
@@ -828,7 +889,89 @@ function tabBody() {
       : null,
     mode === 'none'
       ? h('div', { class: 'form-row full' }, h('div', { class: 'form-hint' }, '该接口不发送请求体'))
-      : null
+      : null,
+    mode === 'binary' ? binaryBodyEditor(body) : null
+  );
+}
+
+/** binary Body：文件路径 / 类型 / 文件名；桌面端可直接选文件 */
+function binaryBodyEditor(body) {
+  if (!body.binary || typeof body.binary !== 'object') body.binary = { file_path: '', file_type: '', file_name: '' };
+  const bin = body.binary;
+
+  const setField = (key, value) => {
+    bin[key] = value;
+    markDirty();
+  };
+
+  const pickBtn = window.apipostShell?.pickFile
+    ? h(
+        'button',
+        {
+          class: 'small',
+          onclick: async () => {
+            try {
+              const picked = await window.apipostShell.pickFile();
+              if (!picked) return;
+              bin.file_path = picked.path || '';
+              if (!bin.file_name) bin.file_name = picked.name || '';
+              markDirty();
+              rerenderPane();
+            } catch (err) {
+              toast(err.message, true);
+            }
+          }
+        },
+        '选择文件'
+      )
+    : null;
+
+  return h(
+    'div',
+    { class: 'form-row full' },
+    h('label', { class: 'form-label' }, '上传文件'),
+    h(
+      'div',
+      { class: 'form-control' },
+      h(
+        'div',
+        { class: 'row-gap' },
+        h('input', {
+          type: 'text',
+          class: 'mono-input',
+          style: 'flex:1',
+          value: bin.file_path || '',
+          placeholder: '文件绝对路径（运行服务所在机器）',
+          oninput: (e) => setField('file_path', e.target.value)
+        }),
+        pickBtn
+      ),
+      h(
+        'div',
+        { class: 'row-gap mt8' },
+        h('input', {
+          type: 'text',
+          class: 'mono-input',
+          value: bin.file_type || '',
+          placeholder: 'Content-Type（默认 application/octet-stream）',
+          oninput: (e) => setField('file_type', e.target.value)
+        }),
+        h('input', {
+          type: 'text',
+          class: 'mono-input',
+          value: bin.file_name || '',
+          placeholder: '文件名（默认取路径末段）',
+          oninput: (e) => setField('file_name', e.target.value)
+        })
+      ),
+      h(
+        'div',
+        { class: 'form-hint' },
+        window.apipostShell?.pickFile
+          ? '路径是运行服务所在机器上的路径，桌面端可直接选文件'
+          : '浏览器控制台无法读取本地文件路径，请填写运行服务所在机器上的绝对路径'
+      )
+    )
   );
 }
 
@@ -850,8 +993,8 @@ function updateJsonHint(text) {
 
 /* ---------------- 页签：鉴权 ---------------- */
 
-function tabAuth() {
-  const auth = editor.data.request.auth;
+function tabAuth(request = editor.data.request, onChange = markDirty) {
+  const auth = request.auth;
   const type = String(auth.type || 'inherit');
 
   auth.type = type;
@@ -860,7 +1003,7 @@ function tabAuth() {
   const updater = (keys) => (key) => (value) => {
     if (!auth[type]) auth[type] = {};
     auth[type][key] = value;
-    markDirty();
+    onChange();
   };
 
   let detail = null;
@@ -871,11 +1014,11 @@ function tabAuth() {
       { class: 'form-grid' },
       field('用户名', input(auth.basic.username, (v) => {
         auth.basic.username = v;
-        markDirty();
+        onChange();
       })),
       field('密码', input(auth.basic.password, (v) => {
         auth.basic.password = v;
-        markDirty();
+        onChange();
       }, { type: 'password' }))
     );
   } else if (type === 'bearer') {
@@ -885,7 +1028,7 @@ function tabAuth() {
       { class: 'form-grid' },
       field('Token', input(auth.bearer.key, (v) => {
         auth.bearer.key = v;
-        markDirty();
+        onChange();
       }, { placeholder: '{{token}}' }), '支持 {{变量名}} 引用环境变量')
     );
   } else if (type === 'kv') {
@@ -895,15 +1038,15 @@ function tabAuth() {
       { class: 'form-grid' },
       field('位置', select([['header', 'Header'], ['query', 'Query']], auth.kv.in || 'header', (v) => {
         auth.kv.in = v;
-        markDirty();
+        onChange();
       })),
       field('Key', input(auth.kv.key, (v) => {
         auth.kv.key = v;
-        markDirty();
+        onChange();
       }, { placeholder: 'X-API-Key' })),
       field('Value', input(auth.kv.value, (v) => {
         auth.kv.value = v;
-        markDirty();
+        onChange();
       }, { placeholder: '{{apiKey}}' }))
     );
   } else if (type === 'oauth2') {
@@ -913,15 +1056,15 @@ function tabAuth() {
       { class: 'form-grid' },
       field('Access Token', input(auth.oauth2.access_token, (v) => {
         auth.oauth2.access_token = v;
-        markDirty();
+        onChange();
       }, { placeholder: '{{accessToken}}' })),
       field('添加到', select([['header', 'Header'], ['query', 'Query']], auth.oauth2.addTokenTo || 'header', (v) => {
         auth.oauth2.addTokenTo = v;
-        markDirty();
+        onChange();
       })),
       field('前缀', input(auth.oauth2.headerPrefix || '', (v) => {
         auth.oauth2.headerPrefix = v;
-        markDirty();
+        onChange();
       }, { placeholder: 'Bearer' }))
     );
   } else if (type === 'inherit') {
@@ -937,7 +1080,7 @@ function tabAuth() {
       '鉴权类型',
       select(AUTH_TYPES, type, (v) => {
         auth.type = v;
-        markDirty();
+        onChange();
         rerenderPane();
       })
     ),
@@ -961,8 +1104,8 @@ const APT_CHEATSHEET = [
   ['console.log(...)', '写入执行日志']
 ];
 
-function tabScripts() {
-  const req = editor.data.request;
+function tabScripts(request = editor.data.request, onChange = markDirty) {
+  const req = request;
 
   return h(
     'div',
@@ -978,7 +1121,7 @@ function tabScripts() {
           scriptSource(req.pre_tasks),
           (v) => {
             req.pre_tasks = setScriptSource(req.pre_tasks, v);
-            markDirty();
+            onChange();
           },
           { rows: 10, placeholder: '// 发送请求前执行，例如：\napt.environment.set("token", "xxx");' }
         ),
@@ -996,7 +1139,7 @@ function tabScripts() {
           scriptSource(req.post_tasks),
           (v) => {
             req.post_tasks = setScriptSource(req.post_tasks, v);
-            markDirty();
+            onChange();
           },
           { rows: 10, placeholder: '// 收到响应后执行，例如：\napt.test("状态码 200", () => apt.expect(apt.response.code()).to.equal(200));' }
         ),
@@ -1015,6 +1158,103 @@ function tabScripts() {
 }
 
 /* ---------------- 页签：响应 ---------------- */
+
+const RESP_CONTENT_TYPES = [
+  ['json', 'json'],
+  ['xml', 'xml'],
+  ['html', 'html'],
+  ['text', 'text'],
+  ['binary', 'binary']
+];
+
+const VERIFY_TYPES = [
+  ['schema', 'schema（结构校验）'],
+  ['code', 'code（只校验状态码）'],
+  ['none', 'none（不校验）']
+];
+
+/** schema 是否有实际内容（空对象 / 只有 type:object 视为未配置） */
+function hasSchemaContent(schema) {
+  if (!schema || typeof schema !== 'object') return false;
+  const props = schema.properties;
+  const hasProps = props && typeof props === 'object' && Object.keys(props).length > 0;
+  if (hasProps) return true;
+  if (schema.items) return true;
+  if (schema.type && schema.type !== 'object') return true;
+  return false;
+}
+
+/** 响应示例的响应头校验编辑器：写到 ex.expect.headers */
+function expectHeadersEditor(ex, onChange) {
+  ex.expect = ex.expect || {};
+  const entries = Object.entries(ex.expect.headers || {});
+  const host = h('div', { class: 'header-expect' });
+
+  const commit = (next) => {
+    ex.expect.headers = next;
+    onChange();
+  };
+
+  const render = () => {
+    const rows = entries.map(([key, value], i) =>
+      h(
+        'div',
+        { class: 'header-expect-row' },
+        h('input', {
+          type: 'text',
+          class: 'mono-input',
+          value: key,
+          placeholder: 'Header 名',
+          oninput: (e) => {
+            entries[i] = [e.target.value, entries[i][1]];
+            commit(Object.fromEntries(entries.filter(([k]) => k)));
+          }
+        }),
+        h('input', {
+          type: 'text',
+          class: 'mono-input',
+          value,
+          placeholder: '期望包含的值',
+          oninput: (e) => {
+            entries[i] = [entries[i][0], e.target.value];
+            commit(Object.fromEntries(entries.filter(([k]) => k)));
+          }
+        }),
+        h(
+          'button',
+          {
+            class: 'small danger',
+            title: '删除',
+            onclick: () => {
+              entries.splice(i, 1);
+              commit(Object.fromEntries(entries.filter(([k]) => k)));
+              render();
+            }
+          },
+          '×'
+        )
+      )
+    );
+    if (entries.length === 0) rows.push(h('div', { class: 'param-empty' }, '暂无响应头校验'));
+    rows.push(
+      h(
+        'button',
+        {
+          class: 'small',
+          onclick: () => {
+            entries.push(['', '']);
+            render();
+          }
+        },
+        '+ 添加'
+      )
+    );
+    host.replaceChildren(...rows);
+  };
+
+  render();
+  return host;
+}
 
 function tabResponse() {
   const resp = editor.data.response;
@@ -1074,6 +1314,116 @@ function tabResponse() {
               },
               '删除'
             )
+          ),
+          // 校验配置：Content-Type / 校验方式 / 数据结构 / 响应头
+          h(
+            'div',
+            { class: 'response-checks' },
+            h(
+              'label',
+              { class: 'resp-check' },
+              h('span', { class: 'hint' }, 'Content-Type'),
+              select(
+                RESP_CONTENT_TYPES,
+                ex.expect.content_type || 'json',
+                (v) => {
+                  ex.expect.content_type = v;
+                  markDirty();
+                },
+                { class: 'tb-select' }
+              )
+            ),
+            h(
+              'label',
+              { class: 'resp-check' },
+              h('span', { class: 'hint' }, '校验方式'),
+              select(
+                VERIFY_TYPES,
+                ex.expect.verify_type || 'schema',
+                (v) => {
+                  ex.expect.verify_type = v;
+                  markDirty();
+                  renderList();
+                },
+                { class: 'tb-select' }
+              )
+            )
+          ),
+          ex.expect.verify_type === 'schema'
+            ? h(
+                'details',
+                { class: 'resp-schema', ...(ex.__schemaOpen ? { open: true } : {}) },
+                h(
+                  'summary',
+                  {},
+                  '数据结构（JSON Schema）',
+                  hasSchemaContent(ex.expect.schema)
+                    ? h('span', { class: 'tag info' }, '已配置')
+                    : h('span', { class: 'hint' }, '未配置')
+                ),
+                h(
+                  'div',
+                  { class: 'btn-row' },
+                  h(
+                    'button',
+                    {
+                      class: 'small',
+                      onclick: () => {
+                        const schema = window.CurlParse?.jsonToSchema?.(
+                          (() => {
+                            try {
+                              return JSON.parse(ex.raw || '{}');
+                            } catch {
+                              return null;
+                            }
+                          })()
+                        );
+                        if (!schema) {
+                          toast('上方响应体不是合法 JSON，无法反推', true);
+                          return;
+                        }
+                        ex.expect.schema = schema;
+                        ex.raw_schema = schema;
+                        ex.raw_parameter = window.CurlParse?.schemaToParameters?.(schema) || [];
+                        ex.__schemaOpen = true;
+                        markDirty();
+                        renderList();
+                      }
+                    },
+                    '由上方响应体反推'
+                  )
+                ),
+                textarea(
+                  JSON.stringify(ex.expect.schema || {}, null, 2),
+                  (v) => {
+                    // 只在 JSON 合法时写回，避免输入中途把 schema 清空
+                    try {
+                      const parsed = JSON.parse(v || '{}');
+                      ex.expect.schema = parsed;
+                      ex.raw_schema = parsed;
+                      ex.raw_parameter = window.CurlParse?.schemaToParameters?.(parsed) || [];
+                      markDirty();
+                    } catch {}
+                  },
+                  { rows: 10, placeholder: '{\n  "type": "object",\n  "properties": {}\n}' }
+                )
+              )
+            : null,
+          h(
+            'details',
+            { class: 'resp-schema' },
+            h(
+              'summary',
+              {},
+              '响应头校验',
+              Object.keys(ex.expect.headers || {}).length > 0
+                ? h('span', { class: 'tag info' }, `${Object.keys(ex.expect.headers || {}).length} 条`)
+                : h('span', { class: 'hint' }, '未配置')
+            ),
+            expectHeadersEditor(ex, () => {
+              markDirty();
+              renderList();
+            })
           ),
           textarea(
             ex.raw ?? '',
@@ -1587,7 +1937,7 @@ const PROTOCOLS = [
 let lastResponse = null;
 let sending = false;
 
-function requestBar() {
+function requestBar({ readonly = false } = {}) {
   const d = editor.data;
   if (!d || editor.targetType !== 'api') return null;
 
@@ -1599,7 +1949,7 @@ function requestBar() {
       markDirty();
       rerenderPane();
     },
-    { class: 'req-method' }
+    { class: 'req-method', disabled: readonly }
   );
 
   const urlInput = h('input', {
@@ -1607,6 +1957,7 @@ function requestBar() {
     class: 'req-url mono-input',
     value: d.url || '',
     placeholder: 'http://127.0.0.1:5000/ 或 {{base}}/path',
+    readOnly: readonly,
     oninput: (e) => {
       d.url = e.target.value;
       markDirty();
@@ -1616,7 +1967,12 @@ function requestBar() {
   const protocolSelect = select(PROTOCOLS, d.protocol || 'http/1.1', (v) => {
     d.protocol = v;
     markDirty();
-  }, { class: 'req-protocol' });
+  }, { class: 'req-protocol', disabled: readonly });
+
+  // 只读模式（压测 / Mock 页签）不提供发送能力，避免改动设计数据
+  if (readonly) {
+    return h('div', { class: 'request-bar readonly' }, methodSelect, urlInput, protocolSelect);
+  }
 
   const sendMain = h(
     'button',
@@ -1816,6 +2172,130 @@ function jsonTreeView(value, key = null, depth = 0) {
     h('span', { class: `json-value json-${type}` }, type === 'string' ? `"${value}"` : String(value))
   );
 }
+
+/* ---------------- 共用展示组件（UiBits） ---------------- */
+
+/** 与 src/store/runs.js 的 SENSITIVE_KEY 保持一致 */
+const SENSITIVE_HEADER = /authorization|cookie|token|secret|password|api[-_]?key/i;
+
+function maskValue(key, value) {
+  if (!SENSITIVE_HEADER.test(String(key || ''))) return value;
+  return '***';
+}
+
+/** 键值表：headers / query / cookies 通用 */
+function kvTable(pairs, { mask = false, emptyText = '（空）', keyWidth = 200 } = {}) {
+  const entries = Array.isArray(pairs) ? pairs : Object.entries(pairs || {});
+  if (entries.length === 0) return h('div', { class: 'form-hint' }, emptyText);
+  return h(
+    'table',
+    { class: 'kv-table' },
+    h('tbody', {},
+      ...entries.map(([k, v]) => {
+        const text = mask ? maskValue(k, String(v ?? '')) : String(v ?? '');
+        return h(
+          'tr',
+          {},
+          h('td', { class: 'kv-key mono', style: `width:${keyWidth}px` }, String(k)),
+          h('td', { class: 'kv-val mono' }, text)
+        );
+      })
+    )
+  );
+}
+
+function headersTable(headers, label) {
+  const entries = Object.entries(headers || {});
+  return h(
+    'div',
+    { class: 'kv-block' },
+    label ? h('div', { class: 'kv-block-title' }, label, h('span', { class: 'hint' }, ` ${entries.length}`)) : null,
+    kvTable(entries, { mask: Boolean(editor.debugMask), emptyText: '没有' })
+  );
+}
+
+function statusLine({ protocol, status, status_text }) {
+  const code = Number(status) || 0;
+  const cls = code >= 500 ? 'err' : code >= 400 ? 'warn' : code >= 200 && code < 300 ? 'ok' : '';
+  return h(
+    'div',
+    { class: 'status-line' },
+    h('span', { class: `tag ${cls}` }, `${code || '-'} ${status_text || ''}`.trim()),
+    protocol ? h('code', { class: 'mono hint' }, protocol) : null
+  );
+}
+
+/** 解析 Set-Cookie 字符串为字段表 */
+function parseSetCookie(raw) {
+  const text = String(raw || '');
+  const [pair, ...attrs] = text.split(';').map((s) => s.trim()).filter(Boolean);
+  const eq = pair.indexOf('=');
+  const out = {
+    name: eq < 0 ? pair : pair.slice(0, eq),
+    value: eq < 0 ? '' : pair.slice(eq + 1),
+    Path: '',
+    Domain: '',
+    Expires: '',
+    HttpOnly: '',
+    Secure: '',
+    SameSite: ''
+  };
+  for (const attr of attrs) {
+    const idx = attr.indexOf('=');
+    const key = idx < 0 ? attr : attr.slice(0, idx);
+    const val = idx < 0 ? '是' : attr.slice(idx + 1);
+    const canon =
+      key.toLowerCase() === 'path'
+        ? 'Path'
+        : key.toLowerCase() === 'domain'
+          ? 'Domain'
+          : key.toLowerCase() === 'expires'
+            ? 'Expires'
+            : key.toLowerCase() === 'httponly'
+              ? 'HttpOnly'
+              : key.toLowerCase() === 'secure'
+                ? 'Secure'
+                : key.toLowerCase() === 'samesite'
+                  ? 'SameSite'
+                  : key;
+    out[canon] = val;
+  }
+  return out;
+}
+
+function cookieTable(setCookies, { mask = false } = {}) {
+  const list = Array.isArray(setCookies) ? setCookies : [];
+  if (list.length === 0) return h('div', { class: 'form-hint' }, '本次响应没有 Set-Cookie');
+  return h(
+    'div',
+    { class: 'cookie-list' },
+    ...list.map((raw) => {
+      const c = parseSetCookie(raw);
+      const attrs = ['Path', 'Domain', 'Expires', 'HttpOnly', 'Secure', 'SameSite']
+        .filter((k) => c[k])
+        .map((k) => `${k}=${c[k]}`)
+        .join(' · ');
+      return h(
+        'div',
+        { class: 'cookie-item' },
+        h(
+          'div',
+          { class: 'cookie-line' },
+          h('code', { class: 'cookie-name' }, c.name),
+          h('span', { class: 'mono cookie-value' }, mask ? '***' : c.value)
+        ),
+        attrs ? h('div', { class: 'form-hint' }, attrs) : null
+      );
+    })
+  );
+}
+
+/** 可折叠区块 */
+function collapsible(title, body, { open = false } = {}) {
+  return h('details', { class: 'kv-collapse', ...(open ? { open: true } : {}) }, h('summary', {}, title), body);
+}
+
+window.UiBits = { kvTable, headersTable, statusLine, cookieTable, collapsible, parseSetCookie, maskValue };
 
 /* ---------------- 响应体渲染：美化 / 原生 / 预览 / 可视化 ---------------- */
 
@@ -2186,24 +2666,43 @@ function debugPanel() {
   const status = Number(resp.status) || 0;
   const statusCls = status >= 500 ? 'err' : status >= 400 ? 'warn' : status >= 200 && status < 300 ? 'ok' : '';
 
+  // 未脱敏的完整详情（本地即时返回）；旧服务没有该项时回落到脱敏字段
+  const live = lastResponse.live_detail || null;
+  const liveReq = live?.request || lastResponse.request || null;
+  const liveResp = live?.response || null;
+
   const meta = h(
     'div',
     { class: 'response-meta' },
     h('span', { class: `tag ${statusCls}` }, `${status} ${resp.status_text || ''}`.trim()),
-    h('span', { class: 'hint' }, `${lastResponse.protocol || 'HTTP/1.1'}`),
+    h('span', { class: 'hint' }, `${liveResp?.protocol || lastResponse.protocol || 'HTTP/1.1'}`),
     h('span', { class: 'hint' }, `${lastResponse.elapsed_ms ?? '-'} ms`),
     h('span', { class: 'hint' }, formatSize(resp.size || (resp.body || '').length)),
+    lastResponse.request?.url
+      ? h(
+          'code',
+          {
+            class: 'mono hint meta-url',
+            title: lastResponse.request.url,
+            onclick: async () => {
+              const res = await copyText(lastResponse.request.url);
+              if (res.ok) toast('已复制 URL');
+              else toastCopyFailed(res.error);
+            }
+          },
+          truncateUrl(lastResponse.request.url)
+        )
+      : null,
     h('span', { class: 'spacer' }),
     h(
       'button',
       {
         class: 'small',
-        onclick: () => {
+        onclick: async () => {
           const text = resp.body || '';
-          navigator.clipboard
-            .writeText(text)
-            .then(() => toast('已复制响应体'))
-            .catch(() => toast('复制失败', true));
+          const res = await copyText(text);
+          if (res.ok) toast('已复制响应体');
+          else toastCopyFailed(res.error);
         }
       },
       '复制响应'
@@ -2220,10 +2719,6 @@ function debugPanel() {
 
   // 响应体：由工具条驱动（美化/原生/预览/可视化 + 格式 + 编码）
   const bodyNode = buildResponseBody(view, lastResponse);
-  // 响应头
-  const headerRows = Object.entries(resp.headers || {}).map(([k, v]) =>
-    h('div', { class: 'curl-kv' }, h('code', {}, k), h('span', { class: 'mono curl-kv-value' }, String(v)))
-  );
 
   // 断言
   const assertions = lastResponse.assertions || [];
@@ -2247,9 +2742,54 @@ function debugPanel() {
       ? [h('pre', { class: 'code' }, logs.map((c) => `[${c.level}] ${c.message}`).join('\n'))]
       : [h('div', { class: 'empty' }, '没有日志')];
 
+  // 请求详情
+  const requestNode = requestDetailView(liveReq);
+
+  // 响应头（状态行 + 表 + Set-Cookie）
+  const responseHeaderNode = h(
+    'div',
+    { class: 'headers-pane' },
+    statusLine({
+      protocol: liveResp?.protocol || lastResponse.protocol || 'HTTP/1.1',
+      status: resp.status,
+      status_text: resp.status_text
+    }),
+    headersTable(liveResp?.headers || resp.headers, '响应头'),
+    liveResp?.set_cookies?.length
+      ? h(
+          'div',
+          { class: 'kv-block mt12' },
+          h('div', { class: 'kv-block-title' }, 'Set-Cookie', h('span', { class: 'hint' }, ` ${liveResp.set_cookies.length}`)),
+          cookieTable(liveResp.set_cookies, { mask: editor.debugMask })
+        )
+      : null
+  );
+
+  // Cookie 面板：请求侧 + 响应侧
+  const reqCookies = liveReq?.cookies || {};
+  const cookieHeader = (() => {
+    const headers = liveReq?.headers || {};
+    const key = Object.keys(headers).find((k) => k.toLowerCase() === 'cookie');
+    return key ? headers[key] : '';
+  })();
+  const cookieNode = h(
+    'div',
+    { class: 'cookie-pane' },
+    h('div', { class: 'kv-block-title' }, '请求带的 Cookie'),
+    Object.keys(reqCookies).length > 0
+      ? kvTable(reqCookies, { mask: editor.debugMask, keyWidth: 180 })
+      : cookieHeader
+        ? h('pre', { class: 'code' }, editor.debugMask ? '***' : cookieHeader)
+        : h('div', { class: 'form-hint' }, '本次请求没有 Cookie'),
+    h('div', { class: 'kv-block-title mt16' }, '响应下发的 Cookie'),
+    cookieTable(liveResp?.set_cookies || [], { mask: editor.debugMask })
+  );
+
   const innerTabs = [
     ['body', '实时响应'],
+    ['request', '请求详情'],
     ['headers', '响应头'],
+    ['cookies', 'Cookie'],
     ['assertions', '断言'],
     ['console', '控制台']
   ];
@@ -2257,7 +2797,9 @@ function debugPanel() {
   const active = editor.debugTab || 'body';
   const contentMap = {
     body: bodyNode,
-    headers: h('div', {}, ...headerRows),
+    request: requestNode,
+    headers: responseHeaderNode,
+    cookies: cookieNode,
     assertions: h('div', {}, ...assertNodes),
     console: h('div', {}, ...logNodes)
   };
@@ -2266,6 +2808,47 @@ function debugPanel() {
     'div',
     { class: 'debug-panel' },
     meta,
+    h(
+      'div',
+      { class: 'debug-toolbar' },
+      h(
+        'label',
+        { class: 'check' },
+        h('input', {
+          type: 'checkbox',
+          checked: Boolean(editor.debugMask),
+          onchange: (e) => {
+            editor.debugMask = e.target.checked;
+            rerenderPane();
+          }
+        }),
+        '隐藏敏感值'
+      ),
+      h('span', { class: 'spacer-flex' }),
+      h(
+        'select',
+        {
+          class: 'curl-dialect-select',
+          title: '复制为 cURL 时使用的 shell 格式',
+          onchange: (e) => {
+            setCurlDialect(e.target.value);
+            rerenderPane();
+          }
+        },
+        ...CURL_DIALECT_OPTIONS.map(([value, label]) =>
+          h('option', { value, selected: getCurlDialectSetting() === value }, label)
+        )
+      ),
+      h(
+        'button',
+        {
+          class: 'small',
+          disabled: !liveReq,
+          onclick: () => copyAsCurl(liveReq)
+        },
+        '复制为 cURL'
+      )
+    ),
     h(
       'div',
       { class: 'tabs tabs-sm' },
@@ -2285,6 +2868,91 @@ function debugPanel() {
     ),
     h('div', { class: 'debug-content' }, contentMap[active] || bodyNode)
   );
+}
+
+/** 请求详情面板：方法 + 实际 URL + query + 请求头 + Cookie + body */
+function requestDetailView(req) {
+  if (!req) return h('div', { class: 'empty' }, '没有请求详情');
+
+  const headers = req.headers || {};
+  const query = req.query || {};
+  const bodyMode = req.body_mode || 'none';
+
+  return h(
+    'div',
+    { class: 'request-detail' },
+    h(
+      'div',
+      { class: 'kv-line' },
+      h('span', { class: `method ${String(req.method || '').toUpperCase()}` }, req.method || ''),
+      h('code', { class: 'mono kv-url' }, req.url || '')
+    ),
+    Object.keys(query).length > 0
+      ? h(
+          'div',
+          { class: 'kv-block mt12' },
+          h('div', { class: 'kv-block-title' }, 'Query 参数', h('span', { class: 'hint' }, ` ${Object.keys(query).length}`)),
+          kvTable(query)
+        )
+      : null,
+    h('div', { class: 'kv-block mt12' }, headersTable(headers, '请求头')),
+    bodyMode !== 'none'
+      ? h(
+          'div',
+          { class: 'kv-block mt12' },
+          collapsible(`请求体（${bodyMode}）`, h('pre', { class: 'code' }, req.body || '(空)'), { open: true })
+        )
+      : null
+  );
+}
+
+/* ---------------- 复制为 cURL ---------------- */
+
+const CURL_DIALECT_KEY = 'apipost_curl_dialect';
+const CURL_DIALECT_OPTIONS = [
+  ['auto', '跟随系统'],
+  ['cmd', 'CMD'],
+  ['bash', 'Bash']
+];
+
+/** 读取用户选择的格式（auto 表示按系统判断） */
+function getCurlDialectSetting() {
+  try {
+    const saved = localStorage.getItem(CURL_DIALECT_KEY);
+    if (saved === 'cmd' || saved === 'bash' || saved === 'auto') return saved;
+  } catch {}
+  return 'auto';
+}
+
+function setCurlDialect(value) {
+  try {
+    localStorage.setItem(CURL_DIALECT_KEY, value === 'cmd' || value === 'bash' ? value : 'auto');
+  } catch {}
+}
+
+/** 把请求详情拼成 cURL 并复制 */
+async function copyAsCurl(req) {
+  if (!req) {
+    toast('没有可复制的请求', true);
+    return;
+  }
+  const builder = window.CurlBuild;
+  if (!builder) {
+    toast('cURL 生成器未加载，请刷新页面', true);
+    return;
+  }
+
+  const setting = getCurlDialectSetting();
+  const dialect = setting === 'auto' ? builder.defaultDialect() : setting;
+  const { text, warnings } = builder.buildCurl(req, { dialect });
+
+  const res = await copyText(text);
+  if (!res.ok) {
+    toastCopyFailed(res.error);
+    return;
+  }
+  if (warnings.length > 0) toast(`已复制为 cURL（${warnings[0]}）`);
+  else toast(`已复制为 cURL（${dialect === 'cmd' ? 'CMD' : 'Bash'}）`);
 }
 
 function tryParseJson(text) {
@@ -2367,6 +3035,9 @@ function modeTabs() {
             if (editor.activeMode === key) return;
             editor.activeMode = key;
             rerenderPane();
+            // 保存按钮文案 / 禁用态跟随页签
+            const tb = document.querySelector('.editor-toolbar');
+            if (tb) tb.replaceWith(editorToolbar(window.__designRefresh));
           }
         },
         label
@@ -2603,10 +3274,38 @@ function docEditor() {
   );
 }
 
-/* ---------------- 目录简化界面 ---------------- */
+/* ---------------- 目录：基础 / 参数 / Body / 鉴权 / 脚本 ---------------- */
+
+const FOLDER_TABS = [
+  ['basic', '基础'],
+  ['params', '参数'],
+  ['body', 'Body'],
+  ['auth', '鉴权'],
+  ['scripts', '脚本']
+];
+
+/** 目录可用服务：来自「环境与变量」页维护的项目共享服务 */
+let folderServerCache = null;
+
+async function loadFolderServers() {
+  if (!editor.projectId) return [];
+  try {
+    const res = await api.get(`/projects/${editor.projectId}/servers`);
+    folderServerCache = res.servers || [];
+  } catch {
+    folderServerCache = [];
+  }
+  return folderServerCache;
+}
 
 function folderView() {
   const d = editor.data;
+  d.request = d.request || defaultRequest();
+  if (!Array.isArray(d.request.header?.parameter)) {
+    d.request.header = { parameter: [] };
+  }
+  const activeTab = editor.folderTab || 'basic';
+
   const folderOptions = [['0', '根目录']];
   for (const f of folderOptionsWithDepth()) {
     if (f.id === editor.selectedId) continue;
@@ -2614,10 +3313,11 @@ function folderView() {
   }
 
   const childCount = editor.apiIndex.filter((i) => i.parent_id === editor.selectedId).length;
+  const servers = folderServerCache || [];
 
-  return h(
+  const basicPane = h(
     'div',
-    { class: 'folder-view' },
+    {},
     h(
       'div',
       { class: 'form-grid' },
@@ -2634,6 +3334,22 @@ function folderView() {
           d.parent_id = v;
           markDirty();
         })
+      ),
+      field(
+        '服务（前置 URL）',
+        select(
+          [['0', '跟随环境默认服务']].concat(
+            servers.map((s) => [String(s.server_id), s.name || s.server_id])
+          ),
+          String(d.server_id || '0'),
+          (v) => {
+            d.server_id = v;
+            markDirty();
+          }
+        ),
+        servers.length > 0
+          ? '该目录下的接口会使用所选服务在各环境的地址'
+          : '项目还没有其他服务，可到「环境与变量 → 环境」里新增'
       )
     ),
     h(
@@ -2652,8 +3368,46 @@ function folderView() {
     h(
       'div',
       { class: 'hint mt12' },
-      `该目录下有 ${childCount} 个子项。目录本身不承载请求配置；在其下新建接口即可开始设计。`
+      `该目录下有 ${childCount} 个子项。「参数 / Body / 鉴权 / 脚本」会被其下所有接口继承，接口自身的同名配置优先。`
+    )
+  );
+
+  const panes = {
+    basic: basicPane,
+    params: tabParams(d.request, markDirty, { sections: ['query', 'header', 'cookie'] }),
+    body: tabBody(d.request.body = d.request.body || { mode: 'none', parameter: [] }, markDirty, {
+      allowedModes: [
+        ['none', '不使用'],
+        ['form-data', 'form-data'],
+        ['urlencoded', 'urlencoded']
+      ]
+    }),
+    auth: tabAuth(d.request, markDirty),
+    scripts: tabScripts(d.request, markDirty)
+  };
+
+  return h(
+    'div',
+    { class: 'folder-view' },
+    h(
+      'div',
+      { class: 'tabs tabs-sm folder-tabs' },
+      ...FOLDER_TABS.map(([key, label]) =>
+        h(
+          'button',
+          {
+            class: `tab${activeTab === key ? ' active' : ''}`,
+            onclick: () => {
+              if (activeTab === key) return;
+              editor.folderTab = key;
+              rerenderPane();
+            }
+          },
+          label
+        )
+      )
     ),
+    h('div', { class: 'folder-pane' }, panes[activeTab] || basicPane),
     h(
       'div',
       { class: 'btn-row mt16' },
@@ -2673,8 +3427,12 @@ function buildPane() {
   window.__designState = editor;
   window.__designApi = api;
   window.__designRerender = () => rerenderPane();
-  window.__designMarkDirty = () => markDirty();
+  window.__designMarkDirty = (scope) => markDirty(scope);
+  window.__designMarkClean = (scope) => markClean(scope);
+  window.__designIsDirty = (scope) => isDirty(scope);
+  window.__designHasUnsaved = () => hasUnsaved();
   window.__designSave = () => saveCurrent(window.__designRefresh);
+  window.__designSaveActive = () => saveActiveMode(window.__designRefresh);
 
   // 文档：专属 Markdown 编辑器（不显示接口的六页签）
   if (editor.targetType === 'doc') {
@@ -2719,7 +3477,7 @@ function buildPane() {
       'div',
       { class: 'editor-inner' },
       header,
-      mode === 'case' ? null : requestBar(),
+      mode === 'case' ? null : requestBar({ readonly: mode !== 'debug' }),
       panel
     );
   }
@@ -2807,18 +3565,19 @@ function notifyShadow(action, name, count) {
 
 /* ---------------- 编辑器头部工具条 ---------------- */
 
-/** 保存当前编辑项（按钮与 Ctrl+S 共用） */
+/** 保存设计域（按钮与 Ctrl+S 共用） */
 async function saveCurrent(onRefresh) {
   if (!editor.selectedId || !editor.data) {
     toast('没有可保存的内容', true);
     return false;
   }
-  const payload = { data: editor.data };
+  // preserve_aux：只提交设计字段，避免用旧快照覆盖已保存的 cases / mock
+  const payload = { data: editor.data, preserve_aux: true };
   await api.put(`/projects/${editor.projectId}/apis/${editor.selectedId}`, payload);
-  resetDirty();
+  resetDirty('design');
   await loadTree(editor.projectId);
-  // 重新加载以同步 version 等字段
-  await loadApi(editor.projectId, editor.selectedId);
+  // 重新加载以同步 version 等字段；keepAux 保住用例 / Mock 面板的内存草稿
+  await loadApi(editor.projectId, editor.selectedId, { keepAux: true });
   rerenderTree();
   rerenderPane();
   const tb = document.querySelector('.editor-toolbar');
@@ -2826,6 +3585,22 @@ async function saveCurrent(onRefresh) {
   notifyShadow('update', editor.data?.name || editor.selectedId);
   if (onRefresh) onRefresh();
   return true;
+}
+
+/** 按当前页签决定保存哪一块（设计 / 用例 / Mock） */
+async function saveActiveMode(onRefresh) {
+  const mode = editor.activeMode || 'design';
+  if (mode === 'case') {
+    return window.ApiExtra?.saveCase?.();
+  }
+  if (mode === 'mock') {
+    return window.ApiExtra?.saveMock?.();
+  }
+  if (mode === 'stress') {
+    toast('压测配置无需保存');
+    return false;
+  }
+  return saveCurrent(onRefresh);
 }
 
 /* ---------------- Ctrl+S ---------------- */
@@ -2840,7 +3615,7 @@ function bindSaveShortcut(refreshFn) {
     if (document.querySelector('.modal-mask')) return;
     e.preventDefault();
     e.stopPropagation();
-    saveCurrent(window.__designRefresh).catch((err) => toast(err.message, true));
+    Promise.resolve(saveActiveMode(window.__designRefresh)).catch((err) => toast(err.message, true));
   };
   window.addEventListener('keydown', window.__designSaveHandler, true);
 }
@@ -3125,8 +3900,13 @@ function openSaveAs(onRefresh) {
             parent_id: state.parentId
           });
 
-          // 2. 写入完整 data（参数/Body/脚本/鉴权/响应示例全保留）
-          const payload = deepClone(editor.data);
+          // 2. 拉取源接口最新 data，避免把过期快照里的用例 / Mock 复制到副本
+          let latest = editor.data;
+          try {
+            const fresh = await api.get(`/projects/${editor.projectId}/apis/${editor.selectedId}`);
+            if (fresh?.data) latest = fresh.data;
+          } catch {}
+          const payload = deepClone(latest);
           payload.name = name;
           payload.parent_id = state.parentId;
           payload.target_id = created.target_id;
@@ -3183,6 +3963,23 @@ function openSaveAs(onRefresh) {
   }, 60);
 }
 
+/** 工具条徽标文案：按域拼「未保存 / 用例未保存 / Mock 未保存」 */
+function dirtyBadgeText() {
+  const parts = [];
+  if (editor.dirty) parts.push(DIRTY_LABELS.design);
+  if (editor.caseDirty) parts.push(DIRTY_LABELS.case);
+  if (editor.mockDirty) parts.push(DIRTY_LABELS.mock);
+  return parts.join(' · ') || DIRTY_LABELS.design;
+}
+
+/** 保存按钮文案跟随当前页签 */
+function saveButtonLabel() {
+  const mode = editor.activeMode || 'design';
+  if (mode === 'case') return '保存用例';
+  if (mode === 'mock') return '保存 Mock';
+  return '保存';
+}
+
 function editorToolbar(onRefresh) {
   const hasSelection = Boolean(editor.selectedId);
   const isFolder = editor.targetType === 'folder';
@@ -3220,17 +4017,17 @@ function editorToolbar(onRefresh) {
     h('span', {
       id: 'dirty-badge',
       class: 'tag warn',
-      style: editor.dirty ? '' : 'display:none'
-    }, '未保存'),
+      style: hasUnsaved() ? '' : 'display:none'
+    }, dirtyBadgeText()),
     h(
       'button',
       {
         class: 'primary small',
         disabled: !hasSelection,
         title: '保存（Ctrl+S）',
-        onclick: () => saveCurrent(onRefresh).catch((err) => toast(err.message, true))
+        onclick: () => Promise.resolve(saveActiveMode(onRefresh)).catch((err) => toast(err.message, true))
       },
-      '保存'
+      saveButtonLabel()
     ),
     h(
       'button',
@@ -3255,7 +4052,7 @@ function editorToolbar(onRefresh) {
             await api.req('DELETE', `/projects/${editor.projectId}/apis/${editor.selectedId}`);
             editor.selectedId = null;
             editor.data = null;
-            editor.dirty = false;
+            discardUnsaved();
             await loadTree(editor.projectId);
             notifyShadow('delete', removedName);
             onRefresh();
@@ -3284,7 +4081,7 @@ function renderTreeNodes(nodes, depth = 0) {
           class: `tree-row${editor.selectedId === node.target_id ? ' active' : ''}`,
           style: `padding-left:${indent}px`,
           onclick: async () => {
-            if (editor.dirty && !confirm('当前接口有未保存的修改，确定切换？')) return;
+            if (hasUnsaved() && !confirm('当前接口有未保存的修改（含用例 / Mock），确定切换？')) return;
             try {
               await loadApi(editor.projectId, node.target_id);
               rerenderTree();
@@ -3330,7 +4127,13 @@ function viewApiDesign() {
         editor.projectId = e.target.value;
         editor.selectedId = null;
         editor.data = null;
-        editor.dirty = false;
+        discardUnsaved();
+        // 与顶栏的项目/环境选择保持一致
+        if (state.currentProjectId !== e.target.value) {
+          state.currentProjectId = e.target.value;
+          refreshEnvironments(e.target.value).catch(() => {});
+          renderTopbarEnvs();
+        }
         await refreshDesign();
       }
     },
@@ -3413,12 +4216,24 @@ window.ApiDesign = {
   state: editor,
   reload: refreshDesign,
   unbindShortcut: unbindSaveShortcut,
+  hasUnsaved,
+  discardUnsaved,
+  isDirty,
+  /** 共享给「环境与变量」页复用的表单组件 */
+  paramTable,
+  paramSection,
+  field,
+  select,
+  input,
+  textarea,
+  scriptSource,
+  setScriptSource,
   /** 从「最近」等外部入口跳到指定接口 */
   openTarget: async (projectId, targetId) => {
     editor.projectId = projectId;
     editor.selectedId = null;
     editor.data = null;
-    editor.dirty = false;
+    discardUnsaved();
     await loadTree(projectId);
     await loadApi(projectId, targetId);
     rerenderTree();
@@ -3430,7 +4245,7 @@ window.ApiDesign = {
 
 /* 离开页面时若有未保存改动，提示确认 */
 window.addEventListener('beforeunload', (e) => {
-  if (!editor.dirty) return;
+  if (!hasUnsaved()) return;
   e.preventDefault();
   e.returnValue = '';
 });

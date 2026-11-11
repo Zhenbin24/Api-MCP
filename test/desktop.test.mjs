@@ -10,11 +10,11 @@ import { sanitizeWindowState, DEFAULT_WINDOW } from '../src/desktop/window-state
 function bootConfig(env, overrides = {}) {
   return {
     ...defaultConfig(),
+    enabled: true,
     token: 'test-token',
     ui_token: 'test-ui-token',
     port: 0,
     data_root: env.root,
-    shadow_root: env.shadow,
     allowed_project_ids: [],
     ...overrides
   };
@@ -39,9 +39,8 @@ test('service-manager：端口空闲时以 owned 模式启动并能关闭', asyn
     service = await startOrAttach({
       config,
       officialRoot: env.root,
-      shadowRoot: env.shadow,
       port: 0,
-      createServer: () => createServer({ config, officialRoot: env.root, shadowRoot: env.shadow })
+      createServer: () => createServer({ config, officialRoot: env.root })
     });
 
     assert.equal(service.mode, 'owned');
@@ -68,7 +67,7 @@ test('service-manager：端口空闲时以 owned 模式启动并能关闭', asyn
 test('service-manager：端口已被同款服务占用时附着，不关闭对方服务', async () => {
   const env = makeTempRoot();
   const ownerConfig = bootConfig(env);
-  const owner = createServer({ config: ownerConfig, officialRoot: env.root, shadowRoot: env.shadow });
+  const owner = createServer({ config: ownerConfig, officialRoot: env.root });
   const address = await owner.listen(0);
   const port = address.port;
 
@@ -79,9 +78,8 @@ test('service-manager：端口已被同款服务占用时附着，不关闭对�
     service = await startOrAttach({
       config,
       officialRoot: env.root,
-      shadowRoot: env.shadow,
       port,
-      createServer: () => createServer({ config, officialRoot: env.root, shadowRoot: env.shadow })
+      createServer: () => createServer({ config, officialRoot: env.root })
     });
 
     assert.equal(service.mode, 'attached');
@@ -115,9 +113,8 @@ test('service-manager：端口被别的程序占用时抛 PortInUseError', async
     const err = await startOrAttach({
       config,
       officialRoot: env.root,
-      shadowRoot: env.shadow,
       port: occupied.port,
-      createServer: () => createServer({ config, officialRoot: env.root, shadowRoot: env.shadow })
+      createServer: () => createServer({ config, officialRoot: env.root })
     }).then(
       () => null,
       (e) => e

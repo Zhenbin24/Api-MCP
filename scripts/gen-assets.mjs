@@ -5,11 +5,17 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const files = ['index.html', 'theme.css', 'style.css', 'app.js', 'design.js', 'extra.js', 'recent.js', 'curl-parse.js'];
+const files = ['index.html', 'theme.css', 'style.css', 'app.js', 'design.js', 'envvars.js', 'extra.js', 'recent.js', 'curl-parse.js', 'curl-build.js'];
 
 const out = {};
 for (const name of files) {
   out[name] = fs.readFileSync(path.join(root, 'web', name), 'utf8');
+}
+
+// 图标是二进制，base64 内联，供 /favicon.png 使用
+const iconPath = path.join(root, 'web', 'icon.png');
+if (fs.existsSync(iconPath)) {
+  out['icon.png'] = { base64: fs.readFileSync(iconPath).toString('base64') };
 }
 
 const module = `// 自动生成（scripts/gen-assets.mjs），请勿手改

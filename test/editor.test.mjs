@@ -10,14 +10,14 @@ async function boot() {
   const env = makeTempRoot();
   const config = {
     ...defaultConfig(),
+    enabled: true,
     token: 'test-token',
     ui_token: 'test-ui',
     port: 0,
     data_root: env.root,
-    shadow_root: env.shadow,
     allowed_project_ids: []
   };
-  const instance = createServer({ config, officialRoot: env.root, shadowRoot: env.shadow });
+  const instance = createServer({ config, officialRoot: env.root });
   const address = await instance.listen(0);
   const base = `http://127.0.0.1:${address.port}`;
   const headers = { 'X-UI-Token': 'test-ui', 'Content-Type': 'application/json' };
@@ -230,38 +230,25 @@ test('ç¼–è¾‘å™¨ï¼šæ—  token è¿”å›ž 401', async () => {
   }
 });
 
-test('ç¼–è¾‘å™¨ï¼šä¿å­˜åŽ diff æ˜¾ç¤º aheadï¼Œpush åŽå®˜æ–¹ç›®å½•æ›´æ–°', async () => {
+test('ç¼–è¾‘å™¨ï¼šä¿å­˜åŽå®˜æ–¹ç›®å½•ç«‹å³æ›´æ–°', async () => {
   const { env, instance, req } = await boot();
   try {
-    // å…ˆæ‹‰å–å»ºç«‹åŸºçº¿
-    await req('POST', `/api/projects/${env.projectId}/pull`, {});
-    const before = await req('GET', `/api/projects/${env.projectId}/diff`);
-    assert.equal(before.data.state, 'synced');
-
     const created = await req('POST', `/api/projects/${env.projectId}/apis`, {
-      name: 'æŽ¨é€éªŒè¯æŽ¥å£',
+      name: 'ç›´å†™éªŒè¯æŽ¥å£',
       target_type: 'api',
       method: 'GET',
       url: 'https://api.test/push-check'
     });
     const targetId = created.data.target_id;
 
-    const diff = await req('GET', `/api/projects/${env.projectId}/diff`);
-    assert.equal(diff.data.state, 'ahead');
-    assert.ok(diff.data.entries.some((e) => e.path.endsWith(`${targetId}.json`)), 'æ–°æŽ¥å£æ–‡ä»¶åº”å‡ºçŽ°åœ¨å·®å¼‚é‡Œ');
-    assert.ok(diff.data.entries.some((e) => e.path === 'project/apis/index.json'), 'ç´¢å¼•æ–‡ä»¶åº”å‡ºçŽ°åœ¨å·®å¼‚é‡Œ');
-
-    const push = await req('POST', `/api/projects/${env.projectId}/push`, {});
-    assert.equal(push.data.remaining, 'synced');
-
-    // å®˜æ–¹ç›®å½•åº”çœŸçš„å‡ºçŽ°è¯¥æ–‡ä»¶
+    // å®˜æ–¹ç›®å½•åº”çœŸçš„å‡ºçŽ°è¯¥æ–‡ä»¶ï¼ˆæ— éœ€æŽ¨é€ï¼‰
     const officialFile = path.join(env.root, 'offline-data', env.projectId, 'apis', `${targetId}.json`);
-    assert.ok(fs.existsSync(officialFile), 'push åŽå®˜æ–¹ç›®å½•åº”æœ‰è¯¥æŽ¥å£æ–‡ä»¶');
+    assert.ok(fs.existsSync(officialFile), 'ä¿å­˜åŽå®˜æ–¹ç›®å½•åº”æœ‰è¯¥æŽ¥å£æ–‡ä»¶');
 
     const officialIndex = JSON.parse(
       fs.readFileSync(path.join(env.root, 'offline-data', env.projectId, 'apis', 'index.json'), 'utf8')
     );
-    assert.ok(officialIndex.items.some((i) => i.target_id === targetId && i.name === 'æŽ¨é€éªŒè¯æŽ¥å£'));
+    assert.ok(officialIndex.items.some((i) => i.target_id === targetId && i.name === 'ç›´å†™éªŒè¯æŽ¥å£'));
   } finally {
     await instance.close();
     cleanup(env.base);
@@ -291,15 +278,14 @@ test('ç¼–è¾‘å™¨ï¼šdesign.js ä¸Žæ ·å¼å¯è®¿é—®', async () => {
   }
 });
 
-/* ---------------- ÐÂ½¨Ìø×ª / ÎÄµµÄÚÈÝ / nav_order ---------------- */
+/* ---------------- ï¿½Â½ï¿½ï¿½ï¿½×ª / ï¿½Äµï¿½ï¿½ï¿½ï¿½ï¿½ / nav_order ---------------- */
 
-test('ÐÂ½¨£ºÎÄµµ content ¿ÉÐ´Èë²¢¶Á»Ø', async () => {
+test('ï¿½Â½ï¿½ï¿½ï¿½ï¿½Äµï¿½ content ï¿½ï¿½Ð´ï¿½ë²¢ï¿½ï¿½ï¿½ï¿½', async () => {
   const { env, instance, req } = await boot();
   try {
-    await req('POST', `/api/projects/${env.projectId}/pull`, {});
 
     const doc = await req('POST', `/api/projects/${env.projectId}/apis`, {
-      name: 'ÎÒµÄÎÄµµ',
+      name: 'ï¿½Òµï¿½ï¿½Äµï¿½',
       target_type: 'doc',
       parent_id: '0'
     });
@@ -311,32 +297,31 @@ test('ÐÂ½¨£ºÎÄµµ content ¿ÉÐ´Èë²¢¶Á»Ø', async () => {
     const data = detail.data.data;
     assert.equal(typeof data.content, 'string');
 
-    data.content = '# ±êÌâ\n\nÕâÊÇ **´ÖÌå** ºÍ `code`¡£';
+    data.content = '# ï¿½ï¿½ï¿½ï¿½\n\nï¿½ï¿½ï¿½ï¿½ **ï¿½ï¿½ï¿½ï¿½** ï¿½ï¿½ `code`ï¿½ï¿½';
     const put = await req('PUT', `/api/projects/${env.projectId}/apis/${docId}`, { data });
     assert.equal(put.data.ok, true);
 
     const again = await req('GET', `/api/projects/${env.projectId}/apis/${docId}`);
-    assert.equal(again.data.data.content, '# ±êÌâ\n\nÕâÊÇ **´ÖÌå** ºÍ `code`¡£');
+    assert.equal(again.data.data.content, '# ï¿½ï¿½ï¿½ï¿½\n\nï¿½ï¿½ï¿½ï¿½ **ï¿½ï¿½ï¿½ï¿½** ï¿½ï¿½ `code`ï¿½ï¿½');
   } finally {
     await instance.close();
     cleanup(env.base);
   }
 });
 
-test('ÐÂ½¨£ºÄ¿Â¼ÏÂÐÂ½¨½Ó¿Ú£¬¸¸Ä¿Â¼ÕýÈ·ÇÒÏêÇé¿ÉÈ¡', async () => {
+test('ï¿½Â½ï¿½ï¿½ï¿½Ä¿Â¼ï¿½ï¿½ï¿½Â½ï¿½ï¿½Ó¿Ú£ï¿½ï¿½ï¿½Ä¿Â¼ï¿½ï¿½È·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¡', async () => {
   const { env, instance, req } = await boot();
   try {
-    await req('POST', `/api/projects/${env.projectId}/pull`, {});
 
     const folder = await req('POST', `/api/projects/${env.projectId}/apis`, {
-      name: '·Ö×é',
+      name: 'ï¿½ï¿½ï¿½ï¿½',
       target_type: 'folder',
       parent_id: '0'
     });
     const folderId = folder.data.target_id;
 
     const api = await req('POST', `/api/projects/${env.projectId}/apis`, {
-      name: '×Ó½Ó¿Ú',
+      name: 'ï¿½Ó½Ó¿ï¿½',
       target_type: 'api',
       method: 'POST',
       url: 'https://api.test/sub',
@@ -344,13 +329,13 @@ test('ÐÂ½¨£ºÄ¿Â¼ÏÂÐÂ½¨½Ó¿Ú£¬¸¸Ä¿Â¼ÕýÈ·ÇÒÏêÇé¿ÉÈ¡', async () => {
     });
     assert.equal(api.data.parent_id, folderId);
 
-    // Ìø×ªÄ¿±êÓÐÐ§£ºGET ÏêÇéÄÜÄÃµ½
+    // ï¿½ï¿½×ªÄ¿ï¿½ï¿½ï¿½ï¿½Ð§ï¿½ï¿½GET ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ãµï¿½
     const detail = await req('GET', `/api/projects/${env.projectId}/apis/${api.data.target_id}`);
     assert.equal(detail.status, 200);
-    assert.equal(detail.data.data.name, '×Ó½Ó¿Ú');
+    assert.equal(detail.data.data.name, 'ï¿½Ó½Ó¿ï¿½');
     assert.equal(detail.data.data.parent_id, folderId);
 
-    // Ä¿Â¼ÏêÇéÍ¬Ñù¿ÉÈ¡
+    // Ä¿Â¼ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½ï¿½ï¿½È¡
     const folderDetail = await req('GET', `/api/projects/${env.projectId}/apis/${folderId}`);
     assert.equal(folderDetail.status, 200);
     assert.equal(folderDetail.data.target_type, 'folder');
@@ -360,46 +345,44 @@ test('ÐÂ½¨£ºÄ¿Â¼ÏÂÐÂ½¨½Ó¿Ú£¬¸¸Ä¿Â¼ÕýÈ·ÇÒÏêÇé¿ÉÈ¡', async () => {
   }
 });
 
-test('ÐÂ½¨£ºÎÄµµ±£´æºó version µÝÔö', async () => {
+test('ï¿½Â½ï¿½ï¿½ï¿½ï¿½Äµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ version ï¿½ï¿½ï¿½ï¿½', async () => {
   const { env, instance, req } = await boot();
   try {
-    await req('POST', `/api/projects/${env.projectId}/pull`, {});
     const doc = await req('POST', `/api/projects/${env.projectId}/apis`, {
-      name: '°æ±¾ÎÄµµ',
+      name: 'ï¿½æ±¾ï¿½Äµï¿½',
       target_type: 'doc'
     });
     const id = doc.data.target_id;
 
     const d1 = await req('GET', `/api/projects/${env.projectId}/apis/${id}`);
     const data = d1.data.data;
-    data.content = 'µÚÒ»°æ';
+    data.content = 'ï¿½ï¿½Ò»ï¿½ï¿½';
     const put = await req('PUT', `/api/projects/${env.projectId}/apis/${id}`, { data });
     assert.ok(put.data.version >= 2);
 
     const d2 = await req('GET', `/api/projects/${env.projectId}/apis/${id}`);
-    assert.equal(d2.data.data.content, 'µÚÒ»°æ');
+    assert.equal(d2.data.data.content, 'ï¿½ï¿½Ò»ï¿½ï¿½');
   } finally {
     await instance.close();
     cleanup(env.base);
   }
 });
 
-test('ÐÂ½¨£ºÎÄµµÒ²ÄÜÁí´æÎª¸±±¾', async () => {
+test('ï¿½Â½ï¿½ï¿½ï¿½ï¿½Äµï¿½Ò²ï¿½ï¿½ï¿½ï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½', async () => {
   const { env, instance, req } = await boot();
   try {
-    await req('POST', `/api/projects/${env.projectId}/pull`, {});
     const src = await req('POST', `/api/projects/${env.projectId}/apis`, {
-      name: 'Ô­ÎÄ',
+      name: 'Ô­ï¿½ï¿½',
       target_type: 'doc'
     });
     const srcId = src.data.target_id;
     const detail = await req('GET', `/api/projects/${env.projectId}/apis/${srcId}`);
     const data = detail.data.data;
-    data.content = 'Ô­ÎÄÄÚÈÝ';
+    data.content = 'Ô­ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½';
     await req('PUT', `/api/projects/${env.projectId}/apis/${srcId}`, { data });
 
     const copy = await req('POST', `/api/projects/${env.projectId}/apis`, {
-      name: 'Ô­ÎÄ ¸±±¾',
+      name: 'Ô­ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½',
       target_type: 'doc',
       parent_id: '0'
     });
@@ -407,13 +390,13 @@ test('ÐÂ½¨£ºÎÄµµÒ²ÄÜÁí´æÎª¸±±¾', async () => {
 
     const srcDetail = await req('GET', `/api/projects/${env.projectId}/apis/${srcId}`);
     const payload = structuredClone(srcDetail.data.data);
-    payload.name = 'Ô­ÎÄ ¸±±¾';
+    payload.name = 'Ô­ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½';
     payload.target_id = copyId;
     await req('PUT', `/api/projects/${env.projectId}/apis/${copyId}`, { data: payload });
 
     const copied = await req('GET', `/api/projects/${env.projectId}/apis/${copyId}`);
-    assert.equal(copied.data.data.content, 'Ô­ÎÄÄÚÈÝ');
-    assert.equal(copied.data.data.name, 'Ô­ÎÄ ¸±±¾');
+    assert.equal(copied.data.data.content, 'Ô­ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½');
+    assert.equal(copied.data.data.name, 'Ô­ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½');
   } finally {
     await instance.close();
     cleanup(env.base);

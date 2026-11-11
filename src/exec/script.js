@@ -513,7 +513,7 @@ function fmt(value) {
   }
 }
 
-/** 官方脚本任务结构 -> 源码数组 */
+/** 官方脚本任务结构 -> 源码数组（origin 标记来源：global / folder / api） */
 export function collectScripts(tasks = []) {
   const out = [];
   for (const task of tasks || []) {
@@ -521,7 +521,7 @@ export function collectScripts(tasks = []) {
     if (task.type !== 'customScript') continue;
     if (!task.enabled || Number(task.enabled) <= 0) continue;
     if (typeof task.data === 'string' && task.data.trim()) {
-      out.push({ id: task.id, source: task.data });
+      out.push({ id: task.id, source: task.data, origin: task.__source || '' });
     }
   }
   return out;

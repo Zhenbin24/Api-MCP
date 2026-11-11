@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { openShadow } from '../store/shadow.js';
+import { openProject } from '../store/target.js';
 import {
   listProjects as storeListProjects,
   getProject,
@@ -42,25 +42,26 @@ import {
   getGlobalVariables,
   upsertGlobalVariable,
   deleteGlobalVariable,
-  sharedServers
+  sharedServers,
+  readCurrentEnvId,
+  writeCurrentEnvId
 } from '../store/envs.js';
 import { createFlow, updateFlow, listFlows, getFlow, deleteFlow, assertFlow, buildStep } from '../store/flows.js';
 import { listRuns, getRun, assertRun } from '../store/runs.js';
-import { pullProject, pushProject, diffProject, SYNC_STATE, isPulled } from '../sync/index.js';
+import { readGlobalParams, writeGlobalParams } from '../store/globals.js';
 import { parseOpenApi } from '../openapi/convert.js';
 import { runApi, runFlow } from '../exec/runner.js';
 import { hexId } from '../util/ids.js';
 
 /** 工具执行上下文 */
 export class ToolContext {
-  constructor({ officialRoot, shadowRoot, config }) {
+  constructor({ officialRoot, config }) {
     this.officialRoot = officialRoot;
-    this.shadowRoot = shadowRoot;
     this.config = config || {};
   }
 
   target(projectId) {
-    return openShadow({ shadowRoot: this.shadowRoot, projectId });
+    return openProject({ officialRoot: this.officialRoot, projectId });
   }
 
   allowedProjects() {
@@ -82,9 +83,6 @@ export class ToolContext {
       throw new Error(`项目未授权访问：${projectId}。请在 MCP 控制台勾选该项目。`);
     }
     assertProject(this.officialRoot, projectId);
-    if (!isPulled(this.shadowRoot, projectId)) {
-      pullProject(this.officialRoot, this.shadowRoot, projectId, { force: true });
-    }
     return this.target(projectId);
   }
 
@@ -130,16 +128,6 @@ export class ToolContext {
 
 /* ------------------------- 项目 ------------------------- */
 
-function syncStatusOf(ctx, projectId) {
-  try {
-    if (!isPulled(ctx.shadowRoot, projectId)) return { state: SYNC_STATE.NOT_PULLED, changed_files: 0 };
-    const diff = diffProject(ctx.officialRoot, ctx.shadowRoot, projectId);
-    return { state: diff.state, changed_files: diff.entries.length };
-  } catch {
-    return { state: 'unknown', changed_files: 0 };
-  }
-}
-
 export function apipost_list_projects(ctx) {
   ctx.assertEnabled();
   const allowed = ctx.allowedProjects();
@@ -147,12 +135,8 @@ export function apipost_list_projects(ctx) {
     (p) => !allowed || allowed.length === 0 || allowed.includes(p.project_id)
   );
   return {
-    projects: projects.map((p) => ({
-      ...p,
-      sync: syncStatusOf(ctx, p.project_id)
-    })),
-    data_root: ctx.officialRoot,
-    shadow_root: ctx.shadowRoot
+    projects: projects.map((p) => ({ ...p })),
+    data_root: ctx.officialRoot
   };
 }
 
@@ -164,9 +148,6 @@ export function apipost_create_project(ctx, args) {
     storagePath: args.storage_path
   });
 
-  // 新项目目录不存在覆盖风险，随后立即拉取影子
-  pullProject(ctx.officialRoot, ctx.shadowRoot, created.project_id, { force: true });
-
   const allowed = ctx.config.allowed_project_ids;
   if (Array.isArray(allowed) && !allowed.includes(created.project_id)) {
     allowed.push(created.project_id);
@@ -174,7 +155,6 @@ export function apipost_create_project(ctx, args) {
 
   return {
     ...created,
-    pulled: true,
     message: `项目「${created.name}」已创建并加入 MCP 授权，可以继续同步接口或创建执行计划。`
   };
 }
@@ -455,7 +435,7 @@ export async function apipost_execute_api(ctx, args) {
   ctx.assertExecutable(args.project_id);
   const preferred = ctx.config.preferred_env?.[args.project_id];
   return runApi({
-    shadowRoot: ctx.shadowRoot,
+    officialRoot: ctx.officialRoot,
     projectId: args.project_id,
     targetId: args.target_id,
     input: args.input || {},
@@ -469,7 +449,7 @@ export async function apipost_execute_flow(ctx, args) {
   ctx.assertExecutable(args.project_id);
   const preferred = ctx.config.preferred_env?.[args.project_id];
   return runFlow({
-    shadowRoot: ctx.shadowRoot,
+    officialRoot: ctx.officialRoot,
     projectId: args.project_id,
     flowId: args.flow_id,
     envId: args.environment_id,
@@ -484,8 +464,12 @@ export function apipost_list_environments(ctx, args) {
   const target = ctx.assertAllowed(args.project_id);
   const envs = listEnvironments(target);
   const preferred = ctx.config.preferred_env?.[args.project_id];
+  const remembered = readCurrentEnvId(target);
   const current =
-    envs.find((e) => e.env_id === preferred) || envs.find((e) => String(e.env_id) === '1') || envs[0];
+    envs.find((e) => e.env_id === remembered) ||
+    envs.find((e) => e.env_id === preferred) ||
+    envs.find((e) => String(e.env_id) === '1') ||
+    envs[0];
   return {
     project_id: args.project_id,
     current_env_id: current?.env_id || '',
@@ -494,13 +478,16 @@ export function apipost_list_environments(ctx, args) {
 }
 
 export function apipost_switch_environment(ctx, args) {
-  const target = ctx.assertAllowed(args.project_id);
+  const target = ctx.assertWritable(args.project_id);
   const env = assertEnv(target, args.environment_id);
+  writeCurrentEnvId(target, env.env_id);
+  // 同步到配置文件，便于 stdio 端参考
+  ctx.config.preferred_env = { ...(ctx.config.preferred_env || {}), [args.project_id]: env.env_id };
   return {
     project_id: args.project_id,
     current_env_id: env.env_id,
     name: env.name || env.env_id,
-    note: '已记录为该项目下次执行使用的默认环境。'
+    note: '已记录为该项目当前环境，后续执行（含 AI 调用）默认使用该环境，直到再次切换。'
   };
 }
 
@@ -589,7 +576,6 @@ export function apipost_get_global_variables(ctx, args) {
   const target = ctx.assertAllowed(args.project_id);
   return { project_id: args.project_id, ...getGlobalVariables(target) };
 }
-
 export function apipost_upsert_global_variable(ctx, args) {
   const target = ctx.assertWritable(args.project_id);
   return upsertGlobalVariable(target, {
@@ -604,6 +590,35 @@ export function apipost_delete_global_variable(ctx, args) {
   if (args.confirm !== true) throw new Error('删除全局变量必须显式传入 confirm: true');
   const target = ctx.assertWritable(args.project_id);
   return deleteGlobalVariable(target, { key: args.key });
+}
+
+/* ------------------------- 全局参数 ------------------------- */
+
+export function apipost_get_global_params(ctx, args) {
+  const target = ctx.assertAllowed(args.project_id);
+  return {
+    project_id: args.project_id,
+    params: readGlobalParams(target),
+    note: '全局参数对项目下所有接口生效；接口自身同名参数优先，目录参数介于两者之间。全局 Body 仅支持 none / form-data / urlencoded。'
+  };
+}
+
+export function apipost_update_global_params(ctx, args) {
+  const target = ctx.assertWritable(args.project_id);
+  const patch = {};
+  for (const key of ['header', 'query', 'cookie', 'body', 'auth', 'pre_tasks', 'post_tasks']) {
+    if (key in args) patch[key] = args[key];
+  }
+  if (Object.keys(patch).length === 0) {
+    throw new Error('没有可更新的内容：请至少传入 header / query / cookie / body / auth / pre_tasks / post_tasks 之一');
+  }
+  const params = writeGlobalParams(target, patch);
+  return {
+    project_id: args.project_id,
+    params,
+    updated_sections: Object.keys(patch),
+    note: '全局参数已保存到 API 单机版项目，其他客户端即可读到。'
+  };
 }
 
 /* ------------------------- 执行计划 ------------------------- */
@@ -754,6 +769,8 @@ const HANDLERS = {
   apipost_get_global_variables,
   apipost_upsert_global_variable,
   apipost_delete_global_variable,
+  apipost_get_global_params,
+  apipost_update_global_params,
   apipost_create_execution_flow,
   apipost_update_execution_flow,
   apipost_list_execution_flows,

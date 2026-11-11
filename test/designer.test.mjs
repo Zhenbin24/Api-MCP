@@ -11,14 +11,14 @@ async function boot() {
   const env = makeTempRoot();
   const config = {
     ...defaultConfig(),
+    enabled: true,
     token: 'test-token',
     ui_token: 'test-ui',
     port: 0,
     data_root: env.root,
-    shadow_root: env.shadow,
     allowed_project_ids: []
   };
-  const instance = createServer({ config, officialRoot: env.root, shadowRoot: env.shadow });
+  const instance = createServer({ config, officialRoot: env.root });
   const address = await instance.listen(0);
   const base = `http://127.0.0.1:${address.port}`;
   const headers = { 'X-UI-Token': 'test-ui', 'Content-Type': 'application/json' };
@@ -45,7 +45,6 @@ async function boot() {
 test('另存为：完整复制接口内容', async () => {
   const { env, instance, req } = await boot();
   try {
-    await req('POST', `/api/projects/${env.projectId}/pull`, {});
 
     const src = await req('POST', `/api/projects/${env.projectId}/apis`, {
       name: '源接口',
@@ -125,7 +124,6 @@ test('另存为：完整复制接口内容', async () => {
 test('另存为：指定目标文件夹', async () => {
   const { env, instance, req } = await boot();
   try {
-    await req('POST', `/api/projects/${env.projectId}/pull`, {});
     const folder = await req('POST', `/api/projects/${env.projectId}/apis`, {
       name: '目标目录',
       target_type: 'folder'
@@ -154,7 +152,6 @@ test('另存为：指定目标文件夹', async () => {
 test('另存为：目录不级联复制子项', async () => {
   const { env, instance, req } = await boot();
   try {
-    await req('POST', `/api/projects/${env.projectId}/pull`, {});
 
     const srcFolder = await req('POST', `/api/projects/${env.projectId}/apis`, {
       name: '源目录',
@@ -197,10 +194,9 @@ test('另存为：目录不级联复制子项', async () => {
   }
 });
 
-test('保存：version 递增且 diff 为 ahead', async () => {
+test('保存：version 递增，改动直接落官方目录', async () => {
   const { env, instance, req } = await boot();
   try {
-    await req('POST', `/api/projects/${env.projectId}/pull`, {});
     const api = await req('POST', `/api/projects/${env.projectId}/apis`, {
       name: '版本测试',
       target_type: 'api',
@@ -217,8 +213,12 @@ test('保存：version 递增且 diff 为 ahead', async () => {
     assert.equal(put.data.ok, true);
     assert.ok(put.data.version >= 2, `version 应递增，实际 ${put.data.version}`);
 
-    const diff = await req('GET', `/api/projects/${env.projectId}/diff`);
-    assert.equal(diff.data.state, 'ahead');
+    // 不经过推送，官方目录里的文件已是新版本
+    const official = JSON.parse(
+      fs.readFileSync(path.join(env.root, 'offline-data', env.projectId, 'apis', `${id}.json`), 'utf8')
+    );
+    assert.equal(official.data.name, '版本测试2');
+    assert.ok(official.version >= 2, `官方文件 version 应递增，实际 ${official.version}`);
   } finally {
     await instance.close();
     cleanup(env.base);
@@ -228,7 +228,6 @@ test('保存：version 递增且 diff 为 ahead', async () => {
 test('保存：允许重名，target_id 不同', async () => {
   const { env, instance, req } = await boot();
   try {
-    await req('POST', `/api/projects/${env.projectId}/pull`, {});
     const a = await req('POST', `/api/projects/${env.projectId}/apis`, {
       name: '同名',
       target_type: 'api',
@@ -257,7 +256,6 @@ test('保存：允许重名，target_id 不同', async () => {
 test('marks：读取默认状态', async () => {
   const { env, instance, req } = await boot();
   try {
-    await req('POST', `/api/projects/${env.projectId}/pull`, {});
     const res = await req('GET', `/api/projects/${env.projectId}/marks`);
     assert.equal(res.status, 200);
     assert.ok(Array.isArray(res.data.marks));
@@ -270,7 +268,6 @@ test('marks：读取默认状态', async () => {
 test('marks：写入后可读回', async () => {
   const { env, instance, req } = await boot();
   try {
-    await req('POST', `/api/projects/${env.projectId}/pull`, {});
     const marks = [
       { mark_id: '1', name: '开发中', color: '#2857FF', is_default_mark: 1, is_sys_default: 1 },
       { mark_id: '2', name: '已完成', color: '#26CEA4', is_default_mark: -1, is_sys_default: 1 },

@@ -10,5 +10,9 @@ contextBridge.exposeInMainWorld('apipostShell', {
     const { color, symbolColor } = payload;
     if (typeof color !== 'string' || typeof symbolColor !== 'string') return;
     ipcRenderer.send('shell:titlebar', { color, symbolColor });
+  },
+  /** 选文件并返回绝对路径（binary Body 用） */
+  pickFile() {
+    return ipcRenderer.invoke('shell:pick-file');
   }
 });

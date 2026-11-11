@@ -3,7 +3,7 @@
  *
  * 两种模式：
  *  - owned    桌面端自己监听端口，启动内置服务；窗口关闭时一并关闭服务。
- *  - attached 端口已被同款服务占用（通常是常驻的 apipost-mcp.exe），
+ *  - attached 端口已被同款服务占用（通常是常驻的 apimcp.exe），
  *             用同样的 ui_token 校验通过后只开窗口，不接管、不关闭对方的服务。
  */
 
@@ -61,7 +61,6 @@ function buildUiUrl({ port, uiToken, host = '127.0.0.1' }) {
  * @param {object} opts
  * @param {object} opts.config        已加载配置（可变）
  * @param {string} opts.officialRoot
- * @param {string} opts.shadowRoot
  * @param {number} opts.port          期望端口
  * @param {Function} opts.createServer () => 服务实例（依赖注入，便于测试）
  * @param {Function} [opts.log]
@@ -71,7 +70,6 @@ function buildUiUrl({ port, uiToken, host = '127.0.0.1' }) {
 export async function startOrAttach({
   config,
   officialRoot,
-  shadowRoot,
   port,
   createServer,
   log = () => {}

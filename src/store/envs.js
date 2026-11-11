@@ -239,6 +239,69 @@ export function deleteEnvironmentServer(target, serverId) {
   return { deleted: true, server_id: serverId };
 }
 
+/* ---------------- 当前环境（存在 local 区，不参与推送） ---------------- */
+
+const CURRENT_ENV_REL = 'local/current_env.json';
+
+/** 读取项目当前环境 ID；未设置时返回空串 */
+export function readCurrentEnvId(target) {
+  const file = target.readJson(CURRENT_ENV_REL, null);
+  const envId = file?.env_id ? String(file.env_id) : '';
+  if (!envId) return '';
+  // 环境可能已被删除，失效则视为未设置
+  return readEnv(target, envId) ? envId : '';
+}
+
+export function writeCurrentEnvId(target, envId) {
+  const trimmed = String(envId || '').trim();
+  if (!trimmed) throw new Error('缺少 environment_id');
+  assertEnv(target, trimmed);
+  target.writeJson(CURRENT_ENV_REL, { env_id: trimmed, updated_at: target.now() });
+  return trimmed;
+}
+
+/**
+ * 解析当前生效环境：显式指定 > 项目记录的当前环境 > 配置的偏好环境 > 默认环境(1) > 第一个。
+ */
+export function resolveCurrentEnv(target, { envId, preferredEnvId } = {}) {
+  const envs = listEnvironments(target);
+  if (envs.length === 0) throw new Error('项目还没有任何环境，请先用 apipost_create_environment 创建');
+  if (envId) return assertEnv(target, envId);
+  const remembered = readCurrentEnvId(target);
+  const pick =
+    envs.find((e) => e.env_id === remembered) ||
+    envs.find((e) => e.env_id === preferredEnvId) ||
+    envs.find((e) => String(e.env_id) === '1') ||
+    envs[0];
+  return pick;
+}
+
+/** 批量写入环境变量：整表保存用，未出现在列表里的 key 会被删除 */
+export function replaceEnvVariables(target, envId, list = []) {
+  const env = assertEnv(target, envId);
+  const defaults = {};
+  const history = readEnvVarsHistory(target);
+  const envRuntime = {};
+  for (const item of list) {
+    const key = String(item?.key ?? '').trim();
+    if (!key) continue;
+    const value = item.value ?? '';
+    const currentValue = item.current_value === undefined || item.current_value === '' ? value : item.current_value;
+    defaults[key] = {
+      value,
+      current_value: currentValue,
+      description: String(item.description || '')
+    };
+    envRuntime[key] = { value: currentValue };
+  }
+  env.env_var_list = defaults;
+  env.updated_at = target.now();
+  writeEnv(target, env);
+  history[envId] = envRuntime;
+  writeEnvVarsHistory(target, history);
+  return getEnvironmentVariables(target, envId);
+}
+
 /** 运行时变量历史（current_value），存在 local 区 */
 export function readEnvVarsHistory(target) {
   return target.readJson(target.l('env_vars_history.json'), {}) || {};
@@ -295,8 +358,15 @@ export function upsertEnvVariable(target, { envId, key, value, currentValue, des
   const prev = defaults[trimmed] || {};
 
   const nextValue = value === undefined ? (prev.value ?? '') : value;
+  const runtimeValue = envRuntime[trimmed]?.value;
+  // 显式改了默认值时，运行时值一并对齐，避免旧的 current_value 一直盖住新值
+  const valueChanged = value !== undefined && String(nextValue) !== String(prev.value ?? '');
   const nextCurrent =
-    currentValue === undefined ? (envRuntime[trimmed]?.value ?? prev.current_value ?? prev.value ?? '') : currentValue;
+    currentValue !== undefined
+      ? currentValue
+      : valueChanged
+        ? nextValue
+        : (runtimeValue ?? prev.current_value ?? nextValue ?? '');
 
   defaults[trimmed] = {
     ...prev,
@@ -363,8 +433,15 @@ export function upsertGlobalVariable(target, { key, value, currentValue, descrip
   const runtime = { ...readGlobalVarsHistory(target) };
   const prev = defaults[trimmed] || {};
   const nextValue = value === undefined ? (prev.value ?? '') : value;
+  const runtimeValue = runtime[trimmed]?.value;
+  // 显式改了默认值时，运行时值一并对齐，避免旧的 current_value 一直盖住新值
+  const valueChanged = value !== undefined && String(nextValue) !== String(prev.value ?? '');
   const nextCurrent =
-    currentValue === undefined ? (runtime[trimmed]?.value ?? prev.current_value ?? prev.value ?? '') : currentValue;
+    currentValue !== undefined
+      ? currentValue
+      : valueChanged
+        ? nextValue
+        : (runtimeValue ?? prev.current_value ?? nextValue ?? '');
 
   defaults[trimmed] = {
     ...prev,

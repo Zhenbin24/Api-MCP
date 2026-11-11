@@ -42,13 +42,13 @@ const STEP_SCHEMA = {
 export const TOOLS = [
   {
     name: 'apipost_list_projects',
-    description: '获取已授权访问的 API 项目清单（含影子工作区同步状态）。',
+    description: '获取已授权访问的 API 项目清单。',
     inputSchema: S({})
   },
   {
     name: 'apipost_create_project',
     description:
-      '在 API 单机版数据目录本地新建项目，并自动加入授权列表。新项目会自动拉取到影子工作区，可立刻继续同步接口、环境或创建执行计划。不会切换用户当前正在界面中使用的项目。',
+      '在 API 单机版数据目录本地新建项目，并自动加入授权列表。新项目会自动同步到工作区，可立刻继续同步接口、环境或创建执行计划。不会切换用户当前正在界面中使用的项目。',
     inputSchema: S(
       {
         name: str('项目名称，最多 64 个字符'),
@@ -234,6 +234,30 @@ export const TOOLS = [
     name: 'apipost_delete_global_variable',
     description: '删除全局变量的默认值与当前运行时值，必须显式传 confirm: true。',
     inputSchema: S({ project_id: str(), key: str(), confirm: bool() }, ['project_id', 'key', 'confirm'])
+  },
+  {
+    name: 'apipost_get_global_params',
+    description:
+      '读取项目全局参数。返回 header / query / cookie / body / auth / pre_tasks / post_tasks；这些配置会合并进项目下每个接口的请求，接口自身的同名参数优先。',
+    inputSchema: S({ project_id: str() }, ['project_id'])
+  },
+  {
+    name: 'apipost_update_global_params',
+    description:
+      '局部更新项目全局参数：只覆盖传入的 section。header / query / cookie 传参数数组即整体替换该节（[{key,value,description,is_checked,field_type}]）；body 仅支持 mode=none|form-data|urlencoded；auth 为浅合并；pre_tasks / post_tasks 传数组整体替换。',
+    inputSchema: S(
+      {
+        project_id: str(),
+        header: arr(anyObj('参数项 {key,value,description,is_checked,field_type}'), '全局 Header 参数（整体替换）'),
+        query: arr(anyObj('参数项 {key,value,description,is_checked,field_type}'), '全局 Query 参数（整体替换）'),
+        cookie: arr(anyObj('参数项 {key,value,description,is_checked,field_type}'), '全局 Cookie 参数（整体替换）'),
+        body: anyObj('全局 Body：{mode:"none|form-data|urlencoded", parameter:[{key,value,description,is_checked,field_type}]}'),
+        auth: anyObj('全局鉴权配置（浅合并）'),
+        pre_tasks: arr(anyObj('脚本任务 {type:"customScript",data:"...",enabled:1}'), '全局前置脚本（整体替换）'),
+        post_tasks: arr(anyObj('脚本任务 {type:"customScript",data:"...",enabled:1}'), '全局后置脚本（整体替换）')
+      },
+      ['project_id']
+    )
   },
   {
     name: 'apipost_create_execution_flow',

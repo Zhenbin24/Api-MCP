@@ -18,6 +18,8 @@ export function makeEmptyCase(name = '新用例') {
     input: {},
     expect_status: '',
     expect_body_contains: '',
+    expect_content_type: '',
+    expect_headers: {},
     pre_script: '',
     post_script: '',
     created_at: now(),
@@ -56,6 +58,13 @@ export function upsertCase(target, targetId, payload = {}) {
   if (incoming.expect_status !== undefined) targetCase.expect_status = String(incoming.expect_status ?? '');
   if (incoming.expect_body_contains !== undefined) {
     targetCase.expect_body_contains = String(incoming.expect_body_contains ?? '');
+  }
+  if (incoming.expect_content_type !== undefined) {
+    targetCase.expect_content_type = String(incoming.expect_content_type ?? '');
+  }
+  if (incoming.expect_headers !== undefined) {
+    targetCase.expect_headers =
+      incoming.expect_headers && typeof incoming.expect_headers === 'object' ? incoming.expect_headers : {};
   }
   if (incoming.pre_script !== undefined) targetCase.pre_script = String(incoming.pre_script ?? '');
   if (incoming.post_script !== undefined) targetCase.post_script = String(incoming.post_script ?? '');

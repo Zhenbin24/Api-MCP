@@ -1,7 +1,7 @@
 /**
  * 窗口尺寸/位置持久化（纯 Node，不依赖 Electron）。
  *
- * 文件：%APPDATA%/ApiPostMCP/desktop-window.json
+ * 文件：%APPDATA%/ApiMCP/desktop-window.json
  * 结构：{ x, y, width, height, maximized }
  */
 import path from 'node:path';

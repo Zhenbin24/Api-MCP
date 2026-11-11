@@ -21,6 +21,9 @@ export function detectDialect(text) {
   if (/\^"/.test(src)) return 'cmd';
   if (/\^\\\^/.test(src)) return 'cmd';
 
+  // CMD：单行且用了 "" 表示字面双引号（bash 用 '...' 包裹参数，不会有这种组合）
+  if (/""/.test(src) && !/(?:^|\s)'/.test(src)) return 'cmd';
+
   // PowerShell：反引号续行，或 curl.exe，或 --%
   if (/`[ \t]*\r?\n/.test(src)) return 'powershell';
   if (/\bcurl\.exe\b/i.test(src)) return 'powershell';
@@ -88,8 +91,11 @@ function unescapePowershell(text) {
 /**
  * 把命令行切成 token 数组。
  * 支持 '...'（字面）、"..."（含 \ 转义）、无引号时的 \ 转义。
+ *
+ * CMD 方言下双引号内的 "" 代表一个字面双引号（CMD 的标准规则），
+ * 由 options.doubledQuotes 打开。
  */
-export function tokenize(line) {
+export function tokenize(line, { doubledQuotes = false } = {}) {
   const tokens = [];
   let current = '';
   let inToken = false;
@@ -113,6 +119,11 @@ export function tokenize(line) {
     }
 
     if (quote === '"') {
+      if (doubledQuotes && ch === '"' && line[i + 1] === '"') {
+        current += '"';
+        i += 1;
+        continue;
+      }
       if (ch === '\\' && i + 1 < line.length) {
         const next = line[i + 1];
         if (next === '"' || next === '\\' || next === '$' || next === '`') {
@@ -302,7 +313,7 @@ export function parseCurl(text, { dialect = 'auto' } = {}) {
   if (detected === 'cmd') prepared = unescapeCmd(prepared);
   else if (detected === 'powershell') prepared = unescapePowershell(prepared);
 
-  const tokens = tokenize(prepared);
+  const tokens = tokenize(prepared, { doubledQuotes: detected === 'cmd' });
 
   // 丢掉开头的 curl / curl.exe
   let startIndex = 0;

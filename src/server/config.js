@@ -1,18 +1,18 @@
 import { readJson, writeJsonAtomic, ensureDir } from '../util/fsx.js';
-import { configPath, defaultShadowRoot, ownRoot, detectOfficialRoot, defaultOfficialRoot } from '../store/paths.js';
+import { configPath, ownRoot, detectOfficialRoot, defaultOfficialRoot, migrateLegacyOwnRoot } from '../store/paths.js';
 import { token as makeToken } from '../util/ids.js';
 
 export const DEFAULT_PORT = 39100;
 
 export function defaultConfig() {
   return {
-    enabled: true,
+    // MCP 服务默认关闭，需在控制台「总览」手动启用后才对外提供能力
+    enabled: false,
     host: '127.0.0.1',
     port: DEFAULT_PORT,
     token: makeToken(24),
     ui_token: makeToken(18),
     data_root: null,
-    shadow_root: null,
     allowed_project_ids: [],
     allow_write: true,
     allow_execute: true,
@@ -29,6 +29,8 @@ export function defaultConfig() {
 }
 
 export function loadConfig() {
+  // 老版本配置目录（ApiPostMCP）→ 新目录（ApiMCP），只在首次启动时迁移一次
+  migrateLegacyOwnRoot();
   const stored = readJson(configPath(), null);
   const base = defaultConfig();
   if (!stored || typeof stored !== 'object') return base;
@@ -49,11 +51,10 @@ export function saveConfig(config) {
   return next;
 }
 
-export function resolveRoots(config, { dataRoot, shadowRoot } = {}) {
+export function resolveRoots(config, { dataRoot } = {}) {
   // 显式参数 > 环境变量 > 配置文件 > 默认探测
   const officialRoot = detectOfficialRoot({ explicit: dataRoot, config });
-  const shadow = shadowRoot || process.env.APIPOST_MCP_SHADOW || config.shadow_root || defaultShadowRoot();
-  return { officialRoot, shadowRoot: shadow };
+  return { officialRoot };
 }
 
 export function publicConfig(config) {
@@ -63,8 +64,7 @@ export function publicConfig(config) {
     has_token: Boolean(token),
     has_ui_token: Boolean(ui_token),
     config_path: configPath(),
-    default_data_root: defaultOfficialRoot(),
-    shadow_root_resolved: config.shadow_root || defaultShadowRoot()
+    default_data_root: defaultOfficialRoot()
   };
 }
 

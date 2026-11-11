@@ -1,8 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { makeTempRoot, cleanup, makeContext, startFakeServer } from './helpers.mjs';
-import { pullProject } from '../src/sync/index.js';
-import { openShadow } from '../src/store/shadow.js';
+import { openProject } from '../src/store/target.js';
 import { createApiOrFolder, readApiFile, writeApiFile, findApiItem } from '../src/store/apis.js';
 import { callTool, ToolContext } from '../src/mcp/tools.js';
 import { handleMessage } from '../src/mcp/protocol.js';
@@ -10,8 +9,7 @@ import { handleMessage } from '../src/mcp/protocol.js';
 async function setup(overrides = {}, { withServer = false } = {}) {
   const env = makeTempRoot();
   const server = withServer ? await startFakeServer() : { url: '', calls: [], close: async () => {} };
-  pullProject(env.root, env.shadow, env.projectId);
-  const target = openShadow({ shadowRoot: env.shadow, projectId: env.projectId });
+  const target = openProject({ officialRoot: env.root, projectId: env.projectId });
 
   if (server.url) {
     const envFile = target.readJson('project/envs/2503d4840ac010.json');
@@ -288,12 +286,12 @@ test('权限：配置文件可持久化 allow_write / allow_execute / enabled', 
 
 test('权限：WorkBuddy 客户端配置已生成', async () => {
   const { buildClientConfigs } = await import('../src/server/client-config.js');
-  const configs = buildClientConfigs({ command: 'C:\\x\\apipost-mcp.exe', args: ['--stdio'] });
+  const configs = buildClientConfigs({ command: 'C:\\x\\apimcp.exe', args: ['--stdio'] });
   assert.ok(configs.workbuddy, '应包含 workbuddy');
   const parsed = JSON.parse(configs.workbuddy);
-  assert.ok(parsed.mcpServers['apipost-offline']);
-  assert.equal(parsed.mcpServers['apipost-offline'].command, 'C:\\x\\apipost-mcp.exe');
-  assert.deepEqual(parsed.mcpServers['apipost-offline'].args, ['--stdio']);
+  assert.ok(parsed.mcpServers['apimcp']);
+  assert.equal(parsed.mcpServers['apimcp'].command, 'C:\\x\\apimcp.exe');
+  assert.deepEqual(parsed.mcpServers['apimcp'].args, ['--stdio']);
 
   for (const key of ['cursor', 'codex', 'claude_code', 'vscode', 'trae', 'workbuddy', 'http']) {
     assert.ok(configs[key], `应包含 ${key}`);

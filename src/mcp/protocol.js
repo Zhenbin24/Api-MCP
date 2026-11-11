@@ -2,7 +2,7 @@ import { TOOLS, findTool } from './schemas.js';
 import { callTool } from './tools.js';
 
 export const PROTOCOL_VERSION = '2024-11-05';
-export const SERVER_INFO = { name: 'apipost-offline', version: '1.0.0' };
+export const SERVER_INFO = { name: 'apimcp', version: '1.0.0' };
 
 function ok(id, result) {
   return { jsonrpc: '2.0', id, result };
@@ -45,7 +45,7 @@ export async function handleMessage(message, ctx) {
         },
         serverInfo: SERVER_INFO,
         instructions:
-          'API MCP 服务。所有写操作落在影子工作区，需在控制台手动推送到 API 单机版。'
+          'API MCP 服务。所有写操作落在工作区，需在控制台手动推送到 API 单机版。'
       });
     }
 

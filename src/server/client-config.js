@@ -2,7 +2,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 /** 生成各客户端配置片段（stdio 模式指向本 exe） */
-export function buildClientConfigs({ command, args = [], serverName = 'apipost-offline' }) {
+export function buildClientConfigs({ command, args = [], serverName = 'apimcp' }) {
   const stdio = {
     command,
     args,

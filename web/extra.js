@@ -32,6 +32,18 @@ function xstate() {
   return window.__designState;
 }
 
+function xmarkDirty(scope) {
+  window.__designMarkDirty?.(scope);
+}
+
+function xmarkClean(scope) {
+  window.__designMarkClean?.(scope);
+}
+
+function xisDirty(scope) {
+  return Boolean(window.__designIsDirty?.(scope));
+}
+
 /* ================= 接口用例 ================= */
 
 const casesState = {
@@ -39,6 +51,7 @@ const casesState = {
   cases: [],
   activeIndex: 0,
   running: false,
+  expanded: null,
   result: null
 };
 
@@ -109,6 +122,7 @@ function casesPanel() {
             });
             casesState.cases = [...cases, res.case];
             casesState.activeIndex = casesState.cases.length - 1;
+            xmarkClean('case');
             window.__designRerender?.();
           } catch (err) {
             xtoast(err.message, true);
@@ -129,6 +143,136 @@ function casesPanel() {
   );
 }
 
+/** 保存当前用例（面板内按钮与 Ctrl+S 共用） */
+async function saveActiveCase() {
+  const st = xstate();
+  const index = casesState.activeIndex;
+  const current = casesState.cases[index];
+  if (!st?.selectedId || !current) {
+    xtoast('没有可保存的用例', true);
+    return false;
+  }
+  try {
+    const res = await xapi().put(`/projects/${st.projectId}/apis/${st.selectedId}/cases/${current.case_id}`, {
+      case: current
+    });
+    casesState.cases[index] = res.case;
+    xmarkClean('case');
+    xtoast('用例已保存');
+    window.__designRerender?.();
+    return true;
+  } catch (err) {
+    xtoast(err.message, true);
+    return false;
+  }
+}
+
+/** 保存当前 Mock 配置（面板内按钮与 Ctrl+S 共用） */
+async function saveMockConfig() {
+  const st = xstate();
+  if (!st?.selectedId) {
+    xtoast('没有可保存的 Mock 配置', true);
+    return false;
+  }
+  let schema = null;
+  if (String(mockState.schemaText || '').trim()) {
+    try {
+      schema = JSON.parse(mockState.schemaText);
+    } catch (err) {
+      xtoast(`数据结构 JSON 语法错误：${err.message}`, true);
+      return false;
+    }
+  }
+  try {
+    const res = await xapi().put(`/projects/${st.projectId}/apis/${st.selectedId}/mock`, {
+      ...(mockState.mock || {}),
+      schema
+    });
+    mockState.mock = res.mock;
+    xmarkClean('mock');
+    xtoast('Mock 配置已保存');
+    window.__designRerender?.();
+    return true;
+  } catch (err) {
+    xtoast(err.message, true);
+    return false;
+  }
+}
+
+/** 用例的「响应头校验」键值表：expect_headers = { Header: 期望值 } */
+function headerExpectTable(c, patch) {
+  const entries = Object.entries(c.expect_headers || {});
+  const host = xh('div', { class: 'header-expect' });
+
+  const commit = (next) => {
+    patch('expect_headers', next);
+  };
+
+  const render = () => {
+    const rows = entries.map(([key, value], i) =>
+      xh(
+        'div',
+        { class: 'header-expect-row' },
+        xh('input', {
+          type: 'text',
+          class: 'mono-input',
+          value: key,
+          placeholder: 'Header 名',
+          oninput: (e) => {
+            const next = Object.fromEntries(entries);
+            delete next[key];
+            next[e.target.value] = value;
+            entries.splice(i, 1, [e.target.value, value]);
+            commit(next);
+          }
+        }),
+        xh('input', {
+          type: 'text',
+          class: 'mono-input',
+          value,
+          placeholder: '期望值（支持包含匹配）',
+          oninput: (e) => {
+            entries[i] = [key, e.target.value];
+            commit(Object.fromEntries(entries));
+          }
+        }),
+        xh(
+          'button',
+          {
+            class: 'small danger',
+            title: '删除',
+            onclick: () => {
+              entries.splice(i, 1);
+              commit(Object.fromEntries(entries));
+              render();
+            }
+          },
+          '×'
+        )
+      )
+    );
+
+    if (entries.length === 0) rows.push(xh('div', { class: 'param-empty' }, '暂无响应头校验'));
+    rows.push(
+      xh(
+        'button',
+        {
+          class: 'small',
+          onclick: () => {
+            entries.push(['', '']);
+            render();
+          }
+        },
+        '+ 添加校验'
+      )
+    );
+    host.replaceChildren(...rows);
+  };
+
+  render();
+  return host;
+}
+
 function caseEditor(c) {
   const st = xstate();
   const index = casesState.activeIndex;
@@ -137,22 +281,10 @@ function caseEditor(c) {
     const target = casesState.cases[index];
     if (!target) return;
     target[key] = value;
-    window.__designMarkDirty?.();
+    xmarkDirty('case');
   };
 
-  const save = async () => {
-    try {
-      const res = await xapi().put(
-        `/projects/${st.projectId}/apis/${st.selectedId}/cases/${c.case_id}`,
-        { case: casesState.cases[index] }
-      );
-      casesState.cases[index] = res.case;
-      window.__designMarkDirty?.();
-      xtoast('用例已保存');
-    } catch (err) {
-      xtoast(err.message, true);
-    }
-  };
+  const save = () => saveActiveCase();
 
   const inputArea = xh('textarea', {
     class: 'mono-input',
@@ -208,6 +340,23 @@ function caseEditor(c) {
           placeholder: '留空表示不校验',
           oninput: (e) => patch('expect_body_contains', e.target.value)
         })
+      ),
+      xh(
+        'div',
+        { class: 'form-row' },
+        xh('label', { class: 'form-label' }, 'Content-Type 包含'),
+        xh('input', {
+          type: 'text',
+          value: c.expect_content_type || '',
+          placeholder: 'application/json（留空表示不校验）',
+          oninput: (e) => patch('expect_content_type', e.target.value)
+        })
+      ),
+      xh(
+        'div',
+        { class: 'form-row full' },
+        xh('label', { class: 'form-label' }, '响应头校验'),
+        xh('div', { class: 'form-control' }, headerExpectTable(c, patch))
       ),
       xh(
         'div',
@@ -278,6 +427,7 @@ function caseEditor(c) {
               );
               casesState.cases.splice(index, 1);
               casesState.activeIndex = Math.max(0, index - 1);
+              xmarkClean('case');
               xtoast('用例已删除');
               window.__designRerender?.();
             } catch (err) {
@@ -302,15 +452,28 @@ function caseEditor(c) {
 }
 
 function caseResultView(result) {
-  const rows = (result.results || []).map((r) =>
+  const rows = (result.results || []).map((r, index) =>
     xh(
       'div',
-      { class: 'case-result-row' },
-      xh('span', { class: `tag ${r.passed ? 'ok' : 'err'}` }, r.passed ? '通过' : '失败'),
-      xh('span', { class: 'case-name' }, r.name),
-      xh('span', { class: 'hint' }, r.status_code ? `HTTP ${r.status_code}` : ''),
-      xh('span', { class: 'hint' }, `${r.elapsed_ms ?? '-'} ms`),
-      r.message ? xh('span', { class: 'hint' }, r.message) : null
+      { class: 'case-result-item' },
+      xh(
+        'div',
+        {
+          class: 'case-result-row clickable',
+          onclick: () => {
+            casesState.expanded = casesState.expanded === index ? null : index;
+            window.__designRerender?.();
+          }
+        },
+        xh('span', { class: `tag ${r.passed ? 'ok' : 'err'}` }, r.passed ? '通过' : '失败'),
+        xh('span', { class: 'case-name' }, r.name),
+        xh('span', { class: 'hint' }, r.status_code ? `HTTP ${r.status_code}` : ''),
+        xh('span', { class: 'hint' }, `${r.elapsed_ms ?? '-'} ms`),
+        r.message ? xh('span', { class: 'hint' }, r.message) : null,
+        xh('span', { class: 'spacer-flex' }),
+        xh('span', { class: 'hint' }, casesState.expanded === index ? '收起' : '详情')
+      ),
+      casesState.expanded === index ? caseResultDetail(r) : null
     )
   );
 
@@ -327,6 +490,52 @@ function caseResultView(result) {
   );
 }
 
+/** 单条用例结果的展开详情：请求 / 响应 */
+function caseResultDetail(r) {
+  const req = r.request || null;
+  const resp = r.response || null;
+  const ui = window.UiBits;
+
+  if (!req && !resp) {
+    return xh('div', { class: 'case-result-detail empty' }, r.message || '没有请求 / 响应详情');
+  }
+
+  const sections = [];
+
+  if (req) {
+    sections.push(xh('div', { class: 'section-title' }, '请求'));
+    sections.push(
+      xh(
+        'div',
+        { class: 'kv-line' },
+        xh('span', { class: `method ${String(req.method || '').toUpperCase()}` }, req.method || ''),
+        xh('code', { class: 'mono kv-url' }, req.url || '')
+      )
+    );
+    if (ui) {
+      sections.push(ui.headersTable(req.headers, '请求头'));
+      if (req.body) sections.push(ui.collapsible('请求体', xh('pre', { class: 'code' }, req.body)));
+    }
+  }
+
+  if (resp) {
+    sections.push(xh('div', { class: 'section-title mt12' }, '响应'));
+    if (ui) {
+      sections.push(ui.statusLine({ status: resp.status, status_text: resp.status_text }));
+      sections.push(ui.headersTable(resp.headers, '响应头'));
+      const bodyText = resp.body || '';
+      sections.push(
+        ui.collapsible(
+          `响应体（${bodyText.length} 字符${resp.truncated ? '，已截断' : ''}）`,
+          xh('pre', { class: 'code' }, bodyText || '(空)')
+        )
+      );
+    }
+  }
+
+  return xh('div', { class: 'case-result-detail' }, ...sections);
+}
+
 async function runOneCase(c) {
   const st = xstate();
   casesState.running = true;
@@ -336,12 +545,14 @@ async function runOneCase(c) {
     await xapi().put(`/projects/${st.projectId}/apis/${st.selectedId}/cases/${c.case_id}`, {
       case: casesState.cases[casesState.activeIndex]
     });
+    xmarkClean('case');
 
     const res = await xapi().post(`/projects/${st.projectId}/cases/run`, {
       target_id: st.selectedId,
       case_ids: [c.case_id]
     });
     casesState.result = res;
+    casesState.expanded = res.results?.length ? 0 : null;
     xtoast(res.failed > 0 ? `用例失败` : '用例通过', res.failed > 0);
   } catch (err) {
     xtoast(err.message, true);
@@ -368,11 +579,13 @@ async function runAllCases() {
         case: current
       });
     }
+    xmarkClean('case');
     const res = await xapi().post(`/projects/${st.projectId}/cases/run`, {
       target_id: st.selectedId,
       case_ids: ids
     });
     casesState.result = res;
+    casesState.expanded = null;
     xtoast(`执行完成：通过 ${res.passed}，失败 ${res.failed}`, res.failed > 0);
   } catch (err) {
     xtoast(err.message, true);
@@ -392,8 +605,16 @@ const stressState = {
   runAssertions: true,
   running: false,
   result: null,
-  progress: 0
+  progress: 0,
+  // 当前结果属于哪个接口；切换接口时清空，避免串到新接口
+  forTarget: null
 };
+
+function resetStress() {
+  stressState.result = null;
+  stressState.progress = 0;
+  stressState.forTarget = null;
+}
 
 function stressPanel() {
   const st = xstate();
@@ -402,6 +623,8 @@ function stressPanel() {
   if (st.targetType !== 'api') return xh('div', { class: 'empty' }, '只有 HTTP 接口支持压测');
 
   const s = stressState;
+  // 换了接口就丢掉上一个接口的压测结果
+  if (s.forTarget && s.forTarget !== st.selectedId) resetStress();
 
   const setField = (key, value) => {
     s[key] = value;
@@ -413,8 +636,8 @@ function stressPanel() {
     s.progress = 0;
     window.__designRerender?.();
     try {
-      // 有未保存改动时先保存
-      if (window.__designState?.dirty) {
+      // 只保存设计域：用例 / Mock 的草稿不参与压测
+      if (window.__designIsDirty?.('design')) {
         await window.__designSave?.();
       }
       const res = await xapi().post(`/projects/${st.projectId}/stress`, {
@@ -426,6 +649,8 @@ function stressPanel() {
         run_assertions: s.runAssertions
       });
       s.result = res;
+      s.forTarget = st.selectedId;
+      s.progress = 1;
       xtoast(`压测完成：${res.total} 次，成功率 ${res.success_rate}%`, res.failed > 0);
     } catch (err) {
       xtoast(`压测失败：${err.message}`, true);
@@ -548,7 +773,15 @@ function stressPanel() {
           s.running ? '压测中…' : '压测'
         ),
         xh('span', { class: 'hint' }, '「轮次」即总请求数；并发数决定同时有多少请求在飞')
-      )
+      ),
+      s.running
+        ? xh(
+            'div',
+            { class: 'stress-progress mt16' },
+            xh('div', { class: 'stress-progress-bar indeterminate' }, xh('div', { class: 'stress-progress-fill' })),
+            xh('div', { class: 'hint mt8' }, '压测进行中，完成后显示进度曲线')
+          )
+        : null
     ),
 
     result
@@ -571,6 +804,7 @@ function stressPanel() {
             metric('QPS', result.qps),
             metric('总耗时', `${result.elapsed_ms} ms`)
           ),
+          progressTimelineView(result.progress_timeline),
           xh('div', { class: 'section-title mt16' }, '响应耗时'),
           xh(
             'div',
@@ -601,12 +835,52 @@ function stressPanel() {
             ? xh(
                 'div',
                 { class: 'mt16' },
-                xh('div', { class: 'section-title' }, '错误样本'),
+                xh(
+                  'div',
+                  { class: 'section-title section-title-row' },
+                  '错误样本',
+                  xh(
+                    'button',
+                    {
+                      class: 'small',
+                      onclick: async () => {
+                        const res = await window.__consoleCopy(result.error_samples.join('\n'));
+                        if (res.ok) xtoast('已复制错误样本');
+                        else window.__consoleCopyFailed(res.error);
+                      }
+                    },
+                    '复制'
+                  )
+                ),
                 ...result.error_samples.map((e) => xh('div', { class: 'form-hint err' }, e))
               )
             : null
         )
       : null
+  );
+}
+
+/** 压测进度曲线：极简 SVG 折线（done / total 随时间推进） */
+function progressTimelineView(timeline) {
+  if (!Array.isArray(timeline) || timeline.length < 2) return null;
+  const W = 520;
+  const H = 90;
+  const max = Math.max(1, ...timeline.map((p) => Number(p.done) || 0));
+  const points = timeline.map((p, i) => {
+    const x = timeline.length === 1 ? 0 : (i / (timeline.length - 1)) * W;
+    const y = H - ((Number(p.done) || 0) / max) * (H - 6) - 3;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+  return xh(
+    'div',
+    { class: 'stress-curve mt16' },
+    xh('div', { class: 'section-title' }, '进度曲线'),
+    xh(
+      'svg',
+      { viewBox: `0 0 ${W} ${H}`, class: 'stress-svg', preserveAspectRatio: 'none' },
+      xh('polyline', { points: points.join(' '), fill: 'none', 'stroke-width': '2' })
+    ),
+    xh('div', { class: 'hint mt8' }, `共 ${timeline.length} 个采样点，峰值 ${max} 次`)
   );
 }
 
@@ -626,8 +900,87 @@ const mockState = {
   mock: null,
   serverRunning: false,
   serverPort: null,
+  startPort: 39101,
+  stats: null,
   schemaText: ''
 };
+
+/** Mock 自定义响应头键值表：写到 mock.headers */
+function mockHeaderTable(m, patch) {
+  const entries = Object.entries(m.headers || {});
+  const host = xh('div', { class: 'header-expect' });
+
+  const commit = (next) => patch('headers', next);
+
+  const render = () => {
+    const rows = entries.map(([key, value], i) =>
+      xh(
+        'div',
+        { class: 'header-expect-row' },
+        xh('input', {
+          type: 'text',
+          class: 'mono-input',
+          value: key,
+          placeholder: 'Header 名',
+          oninput: (e) => {
+            const oldKey = entries[i][0];
+            entries[i] = [e.target.value, entries[i][1]];
+            const next = {};
+            for (const [k, v] of entries) if (k) next[k] = v;
+            commit(next);
+            if (oldKey !== e.target.value) render();
+          }
+        }),
+        xh('input', {
+          type: 'text',
+          class: 'mono-input',
+          value,
+          placeholder: '值',
+          oninput: (e) => {
+            entries[i] = [entries[i][0], e.target.value];
+            const next = {};
+            for (const [k, v] of entries) if (k) next[k] = v;
+            commit(next);
+          }
+        }),
+        xh(
+          'button',
+          {
+            class: 'small danger',
+            title: '删除',
+            onclick: () => {
+              entries.splice(i, 1);
+              const next = {};
+              for (const [k, v] of entries) if (k) next[k] = v;
+              commit(next);
+              render();
+            }
+          },
+          '×'
+        )
+      )
+    );
+
+    if (entries.length === 0) rows.push(xh('div', { class: 'param-empty' }, '暂无自定义响应头'));
+    rows.push(
+      xh(
+        'button',
+        {
+          class: 'small',
+          onclick: () => {
+            entries.push(['', '']);
+            render();
+          }
+        },
+        '+ 添加响应头'
+      )
+    );
+    host.replaceChildren(...rows);
+  };
+
+  render();
+  return host;
+}
 
 async function loadMock() {
   const st = xstate();
@@ -704,6 +1057,7 @@ async function loadMockServer() {
     const res = await xapi().get('/mock-server');
     mockState.serverRunning = Boolean(res.running);
     mockState.serverPort = res.port;
+    mockState.stats = res.stats || null;
   } catch {
     mockState.serverRunning = false;
   }
@@ -726,36 +1080,17 @@ function mockPanel() {
     delay_ms: 0,
     content_type: 'application/json; charset=utf-8',
     body: '',
+    headers: {},
     schema: null
   };
 
   const patch = (key, value) => {
     mockState.mock = { ...(mockState.mock || m), [key]: value };
-    window.__designMarkDirty?.();
+    xmarkDirty('mock');
     window.__designRerender?.();
   };
 
-  const save = async () => {
-    try {
-      let schema = null;
-      if (mockState.schemaText.trim()) {
-        try {
-          schema = JSON.parse(mockState.schemaText);
-        } catch (err) {
-          xtoast(`数据结构 JSON 语法错误：${err.message}`, true);
-          return;
-        }
-      }
-      const res = await xapi().put(`/projects/${st.projectId}/apis/${st.selectedId}/mock`, {
-        ...mockState.mock,
-        schema
-      });
-      mockState.mock = res.mock;
-      xtoast('Mock 配置已保存');
-    } catch (err) {
-      xtoast(err.message, true);
-    }
-  };
+  const save = () => saveMockConfig();
 
   // Mock URL 预览
   const port = mockState.serverPort || 39101;
@@ -770,15 +1105,21 @@ function mockPanel() {
   })();
   const mockUrl = `http://127.0.0.1:${port}${mockPath}`;
 
-  // 预览生成的响应
+  // 预览生成的响应：schema 优先，其次固定 body
   let previewText = '';
+  let previewHint = '';
   if (mockState.schemaText.trim()) {
     try {
       const schema = JSON.parse(mockState.schemaText);
       previewText = JSON.stringify(window.MockGen?.generateFromSchema?.(schema) ?? {}, null, 2);
+      previewHint = '按数据结构随机生成';
     } catch {
       previewText = '(数据结构有语法错误)';
+      previewHint = '数据结构有语法错误';
     }
+  } else if (String(mockState.mock?.body || '').trim()) {
+    previewText = String(mockState.mock.body);
+    previewHint = '固定响应体原文';
   }
 
   return xh(
@@ -798,23 +1139,42 @@ function mockPanel() {
           mockState.serverRunning
             ? `Mock 服务运行中（端口 ${mockState.serverPort}）`
             : 'Mock 服务未启动，点下方「启动 Mock 服务」'
-        )
+        ),
+        mockState.serverRunning && mockState.stats
+          ? xh(
+              'div',
+              { class: 'hint mt8' },
+              `命中 ${mockState.stats.hits ?? 0} 次 · 已启用接口 ${mockState.stats.mock_count ?? 0} 个 · 运行 ${Math.round((mockState.stats.uptime_ms || 0) / 1000)}s`
+            )
+          : null
       )
     ),
 
     xh(
       'div',
       { class: 'btn-row' },
+      xh('span', { class: 'hint' }, '端口'),
+      xh('input', {
+        type: 'number',
+        class: 'mock-port-input',
+        min: '1',
+        max: '65535',
+        value: String(mockState.startPort || 39101),
+        oninput: (e) => {
+          mockState.startPort = Math.max(1, Math.min(65535, Number(e.target.value) || 39101));
+        }
+      }),
       xh(
         'button',
         {
           class: 'small',
           onclick: async () => {
             try {
-              const res = await xapi().post('/mock-server/start', { port: 39101 });
+              const res = await xapi().post('/mock-server/start', { port: mockState.startPort || 39101 });
               mockState.serverRunning = true;
               mockState.serverPort = res.port;
               xtoast(`Mock 服务已启动，端口 ${res.port}`);
+              await loadMockServer();
               window.__designRerender?.();
             } catch (err) {
               xtoast(err.message, true);
@@ -832,6 +1192,7 @@ function mockPanel() {
                 try {
                   await xapi().post('/mock-server/stop', {});
                   mockState.serverRunning = false;
+                  mockState.stats = null;
                   xtoast('Mock 服务已停止');
                   window.__designRerender?.();
                 } catch (err) {
@@ -846,14 +1207,25 @@ function mockPanel() {
         'button',
         {
           class: 'small',
-          onclick: () => {
-            navigator.clipboard
-              .writeText(mockUrl)
-              .then(() => xtoast('已复制 Mock 地址'))
-              .catch(() => xtoast('复制失败', true));
+          onclick: async () => {
+            const res = await window.__consoleCopy(mockUrl);
+            if (res.ok) xtoast('已复制 Mock 地址');
+            else window.__consoleCopyFailed(res.error);
           }
         },
         '复制地址'
+      ),
+      xh(
+        'button',
+        {
+          class: 'small',
+          disabled: !mockState.serverRunning,
+          onclick: async () => {
+            await loadMockServer();
+            window.__designRerender?.();
+          }
+        },
+        '刷新统计'
       )
     ),
 
@@ -887,8 +1259,24 @@ function mockPanel() {
             value: String(m.status || '200'),
             oninput: (e) => {
               mockState.mock = { ...mockState.mock, status: e.target.value };
+              xmarkDirty('mock');
             }
           })
+        ),
+        xh(
+          'div',
+          { class: 'form-row' },
+          xh('label', { class: 'form-label' }, 'Content-Type'),
+          xh('input', {
+            type: 'text',
+            value: String(m.content_type || 'application/json; charset=utf-8'),
+            placeholder: 'application/json; charset=utf-8',
+            oninput: (e) => {
+              mockState.mock = { ...mockState.mock, content_type: e.target.value };
+              xmarkDirty('mock');
+            }
+          }),
+          xh('div', { class: 'form-hint' }, '使用固定响应体时生效；按数据结构生成时固定为 JSON')
         ),
         xh(
           'div',
@@ -901,10 +1289,36 @@ function mockPanel() {
             value: String(m.delay_ms || 0),
             oninput: (e) => {
               mockState.mock = { ...mockState.mock, delay_ms: Number(e.target.value) || 0 };
+              xmarkDirty('mock');
             }
           }),
           xh('div', { class: 'form-hint' }, '模拟慢接口')
         )
+      ),
+      xh(
+        'div',
+        { class: 'form-row full mt12' },
+        xh('label', { class: 'form-label' }, '固定响应体'),
+        xh(
+          'div',
+          { class: 'form-control' },
+          xh('textarea', {
+            class: 'mono-input',
+            rows: 6,
+            placeholder: '数据结构为空时使用这段原文响应',
+            oninput: (e) => {
+              mockState.mock = { ...mockState.mock, body: e.target.value };
+              xmarkDirty('mock');
+            }
+          }, String(m.body || '')),
+          xh('div', { class: 'form-hint' }, '数据结构非空时以数据结构为准，此处内容被忽略')
+        )
+      ),
+      xh(
+        'div',
+        { class: 'form-row full mt12' },
+        xh('label', { class: 'form-label' }, '自定义响应头'),
+        xh('div', { class: 'form-control' }, mockHeaderTable(m, patch))
       )
     ),
 
@@ -920,7 +1334,7 @@ function mockPanel() {
           rows: 16,
           oninput: (e) => {
             mockState.schemaText = e.target.value;
-            window.__designMarkDirty?.();
+            xmarkDirty('mock');
           }
         }, mockState.schemaText),
         xh('div', { class: 'form-hint' }, '按此结构生成随机 Mock 数据；支持 type / properties / APIPOST_ORDERS')
@@ -929,7 +1343,8 @@ function mockPanel() {
         'div',
         { class: 'mock-col' },
         xh('div', { class: 'section-title' }, 'Mock 返回预览'),
-        xh('pre', { class: 'code mock-preview' }, previewText)
+        previewHint ? xh('div', { class: 'form-hint' }, previewHint) : null,
+        xh('pre', { class: 'code mock-preview' }, previewText || '(空)')
       )
     ),
 
@@ -947,13 +1362,19 @@ window.ApiExtra = {
   cases: casesPanel,
   stress: stressPanel,
   mock: mockPanel,
+  saveCase: saveActiveCase,
+  saveMock: saveMockConfig,
   resetCases: () => {
     casesState.loadedFor = null;
     casesState.cases = [];
     casesState.result = null;
+    casesState.expanded = null;
+    casesState.activeIndex = 0;
   },
   resetMock: () => {
     mockState.loadedFor = null;
     mockState.mock = null;
-  }
+    mockState.schemaText = '';
+  },
+  resetStress
 };
