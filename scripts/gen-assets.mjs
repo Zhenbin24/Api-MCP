@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const files = ['index.html', 'theme.css', 'style.css', 'app.js', 'design.js', 'envvars.js', 'extra.js', 'recent.js', 'curl-parse.js', 'curl-build.js'];
+const files = ['index.html', 'theme.css', 'style.css', 'app.js', 'design.js', 'envvars.js', 'transfer.js', 'extra.js', 'recent.js', 'curl-parse.js', 'curl-build.js'];
 
 const out = {};
 for (const name of files) {

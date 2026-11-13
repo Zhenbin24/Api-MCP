@@ -2,20 +2,25 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 import { exists, isDir, ensureDir, readJson, writeJsonAtomic } from '../util/fsx.js';
+import { hexId } from '../util/ids.js';
 
-/** 官方单机版 userData 目录名 */
-const OFFICIAL_APP_DIR = 'Apipost单机版';
 /** 本软件自身配置目录 */
 const OWN_APP_DIR = 'ApiMCP';
 /** 旧版配置目录，首次启动时把配置迁移过来 */
 const LEGACY_OWN_APP_DIR = 'ApiPostMCP';
+/** 数据目录名（挂在 ownRoot 下，与 config.json 同级） */
+const DATA_DIR = 'data';
 
 export function appDataRoot() {
   return process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
 }
 
-export function defaultOfficialRoot() {
-  return path.join(appDataRoot(), OFFICIAL_APP_DIR);
+/**
+ * 本软件自身的数据根。
+ * 默认 %APPDATA%\ApiMCP\data；设了 APIMCP_HOME 则跟着配置目录走，便于做成绿色版。
+ */
+export function defaultDataRoot() {
+  return path.join(ownRoot(), DATA_DIR);
 }
 
 /** 旧版配置目录（不带任何环境变量覆盖） */
@@ -74,27 +79,71 @@ export function migrateLegacyOwnRoot() {
 }
 
 /**
- * 数据根：包含 offline-data / offline-data-local / offline-projects.json 的目录。
- * 探测顺序：显式参数 > 环境变量 > 配置 > %APPDATA%\Apipost单机版 > 逐个候选探测。
+ * 解析数据根：只做路径解析，不创建目录也不校验内容。
+ *
+ * 顺序：显式参数 > APIMCP_DATA_ROOT > 旧环境变量 APIPOST_DATA_ROOT > 配置文件 > 默认目录。
  */
-export function detectOfficialRoot({ explicit, config } = {}) {
-  const candidates = [];
-  if (explicit) candidates.push(explicit);
-  if (process.env.APIPOST_DATA_ROOT) candidates.push(process.env.APIPOST_DATA_ROOT);
-  if (config?.data_root) candidates.push(config.data_root);
-  candidates.push(defaultOfficialRoot());
-
-  for (const candidate of candidates) {
-    const resolved = path.resolve(candidate);
-    if (isOfficialRoot(resolved)) return resolved;
-  }
-  // 都没命中：返回默认路径（让上层给出可读错误），但若显式传入则原样返回
-  return path.resolve(explicit || config?.data_root || process.env.APIPOST_DATA_ROOT || defaultOfficialRoot());
+export function resolveDataRoot({ explicit, config } = {}) {
+  const pick =
+    explicit ||
+    process.env.APIMCP_DATA_ROOT ||
+    process.env.APIPOST_DATA_ROOT ||
+    config?.data_root ||
+    defaultDataRoot();
+  return path.resolve(String(pick));
 }
 
-export function isOfficialRoot(dir) {
-  if (!dir || !isDir(dir)) return false;
-  return exists(path.join(dir, 'offline-projects.json')) || isDir(path.join(dir, 'offline-data'));
+/**
+ * 幂等初始化数据根：缺什么补什么，已存在的内容一律不动。
+ *
+ * 骨架结构（沿用原有序列化格式，只是换了根目录）：
+ *   offline-projects.json          项目索引（数组）
+ *   offline-data/                  各项目数据
+ *   offline-data-local/meta.json   默认团队等本地元信息
+ *   offline-data-local/teams.json  团队列表
+ *
+ * @returns {string} 解析后的绝对路径
+ */
+export function ensureDataRoot(dir = defaultDataRoot()) {
+  const root = path.resolve(String(dir));
+  ensureDir(root);
+  ensureDir(dataDir(root));
+  ensureDir(localDir(root));
+
+  if (!exists(projectsIndexPath(root))) writeJsonAtomic(projectsIndexPath(root), []);
+
+  // team_id 必须先算出来，再分别写两个文件，否则 meta 与 teams 会对不上
+  const teamsFile = localTeamsPath(root);
+  const metaFile = localMetaPath(root);
+  let teamId = '';
+  if (!exists(teamsFile)) {
+    teamId = hexId(new Set());
+    writeJsonAtomic(teamsFile, [{ created_at: new Date().toISOString(), name: '默认团队', team_id: teamId }]);
+  }
+  if (!exists(metaFile)) {
+    const teams = teamId ? [{ team_id: teamId }] : readJson(teamsFile, []);
+    writeJsonAtomic(metaFile, {
+      default_team_id: teamId || teams?.[0]?.team_id || hexId(new Set())
+    });
+  }
+  return root;
+}
+
+/** 目录是否可写（状态接口用来区分「没权限」与「有权限但还空」） */
+export function canWriteDir(dir) {
+  if (!dir) return false;
+  const probe = path.join(dir, `.probe-${process.pid}-${Date.now()}`);
+  try {
+    ensureDir(dir);
+    fs.writeFileSync(probe, '');
+    fs.unlinkSync(probe);
+    return true;
+  } catch {
+    try {
+      if (exists(probe)) fs.unlinkSync(probe);
+    } catch {}
+    return false;
+  }
 }
 
 export function projectsIndexPath(root) {
@@ -217,9 +266,9 @@ export function saveConfig(config) {
   return config;
 }
 
-export function officialMtime(root) {
+export function projectsIndexMtime(root) {
   try {
-    return fs.statSync(path.join(root, 'offline-projects.json')).mtimeMs;
+    return fs.statSync(projectsIndexPath(root)).mtimeMs;
   } catch {
     return 0;
   }

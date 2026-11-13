@@ -10,20 +10,11 @@ import {
 } from '../store/projects.js';
 import {
   listApis,
-  listApiItems,
-  readApiFile,
   ensureApiFile,
-  createApiOrFolder,
   deleteApis,
   findApiItem,
-  readApiIndex,
-  writeApiIndex,
-  writeApiFile,
   buildApiTree,
-  collectDescendantApiIds,
-  TARGET_TYPE,
-  buildEmptyAuth,
-  buildBlankBody
+  TARGET_TYPE
 } from '../store/apis.js';
 import {
   listEnvironments,
@@ -50,18 +41,20 @@ import { createFlow, updateFlow, listFlows, getFlow, deleteFlow, assertFlow, bui
 import { listRuns, getRun, assertRun } from '../store/runs.js';
 import { readGlobalParams, writeGlobalParams } from '../store/globals.js';
 import { parseOpenApi } from '../openapi/convert.js';
+import { applyImportItems, buildScriptMap, normalizeCoverMode, assertFolderId } from '../io/apply.js';
+import { importIntoProject } from '../io/import.js';
+import { exportProject } from '../io/export.js';
 import { runApi, runFlow } from '../exec/runner.js';
-import { hexId } from '../util/ids.js';
 
 /** 工具执行上下文 */
 export class ToolContext {
-  constructor({ officialRoot, config }) {
-    this.officialRoot = officialRoot;
+  constructor({ dataRoot, config }) {
+    this.dataRoot = dataRoot;
     this.config = config || {};
   }
 
   target(projectId) {
-    return openProject({ officialRoot: this.officialRoot, projectId });
+    return openProject({ dataRoot: this.dataRoot, projectId });
   }
 
   allowedProjects() {
@@ -82,7 +75,7 @@ export class ToolContext {
     if (allowed && allowed.length > 0 && !allowed.includes(projectId)) {
       throw new Error(`项目未授权访问：${projectId}。请在 MCP 控制台勾选该项目。`);
     }
-    assertProject(this.officialRoot, projectId);
+    assertProject(this.dataRoot, projectId);
     return this.target(projectId);
   }
 
@@ -128,21 +121,21 @@ export class ToolContext {
 
 /* ------------------------- 项目 ------------------------- */
 
-export function apipost_list_projects(ctx) {
+export function apimcp_list_projects(ctx) {
   ctx.assertEnabled();
   const allowed = ctx.allowedProjects();
-  const projects = storeListProjects(ctx.officialRoot).filter(
+  const projects = storeListProjects(ctx.dataRoot).filter(
     (p) => !allowed || allowed.length === 0 || allowed.includes(p.project_id)
   );
   return {
     projects: projects.map((p) => ({ ...p })),
-    data_root: ctx.officialRoot
+    data_root: ctx.dataRoot
   };
 }
 
-export function apipost_create_project(ctx, args) {
+export function apimcp_create_project(ctx, args) {
   ctx.assertWritableNoProject();
-  const created = storeCreateProject(ctx.officialRoot, {
+  const created = storeCreateProject(ctx.dataRoot, {
     name: args.name,
     intro: args.description,
     storagePath: args.storage_path
@@ -161,7 +154,7 @@ export function apipost_create_project(ctx, args) {
 
 /* ------------------------- API ------------------------- */
 
-export function apipost_list_apis(ctx, args) {
+export function apimcp_list_apis(ctx, args) {
   const target = ctx.assertAllowed(args.project_id);
   const items = listApis(target, { parentId: args.parent_id, keyword: args.keyword });
   return {
@@ -184,7 +177,7 @@ function stripChildren(node) {
   };
 }
 
-export function apipost_get_api_detail(ctx, args) {
+export function apimcp_get_api_detail(ctx, args) {
   const target = ctx.assertAllowed(args.project_id);
   const item = findApiItem(target, args.target_id);
   if (!item) throw new Error(`接口不存在：${args.target_id}`);
@@ -213,11 +206,11 @@ export function apipost_get_api_detail(ctx, args) {
     note:
       item.target_type === TARGET_TYPE.API
         ? undefined
-        : `该对象类型是 ${item.target_type}，只能读取详情；apipost_execute_api 仅支持 HTTP 接口。`
+        : `该对象类型是 ${item.target_type}，只能读取详情；apimcp_execute_api 仅支持 HTTP 接口。`
   };
 }
 
-export function apipost_delete_apis(ctx, args) {
+export function apimcp_delete_apis(ctx, args) {
   if (args.confirm !== true) throw new Error('删除接口必须显式传入 confirm: true');
   const target = ctx.assertWritable(args.project_id);
   const ids = Array.isArray(args.target_ids) ? args.target_ids : [];
@@ -226,21 +219,10 @@ export function apipost_delete_apis(ctx, args) {
   return { ...result, deleted_count: result.deleted_ids.length };
 }
 
-export function apipost_sync_openapi(ctx, args) {
+export function apimcp_sync_openapi(ctx, args) {
   const target = ctx.assertWritable(args.project_id);
-  const coverMode = args.api_cover_mode || 'url_and_folder';
-  const allowedModes = ['url_and_folder', 'url', 'ignore', 'both', 'clear'];
-  if (!allowedModes.includes(coverMode)) {
-    throw new Error(`api_cover_mode 无效：${coverMode}，可选 ${allowedModes.join('/')}`);
-  }
-
-  const folderId = String(args.folder_id || '0');
-  if (folderId !== '0') {
-    const folder = findApiItem(target, folderId);
-    if (!folder || folder.target_type !== TARGET_TYPE.FOLDER) {
-      throw new Error('未找到指定的导入目录，请检查 folder_id 是否为项目内目录的 target_id');
-    }
-  }
+  const coverMode = normalizeCoverMode(args.api_cover_mode);
+  const folderId = assertFolderId(target, args.folder_id);
 
   const parsed = parseOpenApi(args.openapi, {
     basePath: Boolean(args.base_path),
@@ -248,170 +230,13 @@ export function apipost_sync_openapi(ctx, args) {
   });
   if (parsed.items.length === 0) throw new Error('OpenAPI 中没有可导入的接口');
 
-  // api_scripts: method+url -> scripts
-  const scriptMap = new Map();
-  for (const item of args.api_scripts || []) {
-    if (!item || typeof item !== 'object') continue;
-    const method = String(item.method || '').toUpperCase();
-    const url = String(item.url || '');
-    if (!method || !url) continue;
-    scriptMap.set(`${method}_${url}`, item);
-  }
-
-  const index = readApiIndex(target);
-  const now = new Date().toISOString();
-
-  // 覆盖模式：clear 需要先清空目标目录
-  if (coverMode === 'clear') {
-    const toDelete = folderId === '0' ? index.items.map((i) => i.target_id) : collectDescendantApiIds(target, folderId);
-    if (folderId !== '0') {
-      // 目录本身保留，清空其子项
-      const children = index.items.filter((i) => i.parent_id === folderId).map((i) => i.target_id);
-      toDelete.push(...children);
-    }
-    deleteApis(target, toDelete);
-    // 重新读取索引
-    const fresh = readApiIndex(target);
-    index.items = fresh.items;
-  }
-
-  const folderCache = new Map();
-
-  const ensureFolderPath = (names) => {
-    if (!names || names.length === 0) return folderId;
-    let parentId = folderId;
-    for (const name of names) {
-      const key = `${parentId}/${name}`;
-      if (folderCache.has(key)) {
-        parentId = folderCache.get(key);
-        continue;
-      }
-      let existing = index.items.find(
-        (i) => i.target_type === TARGET_TYPE.FOLDER && i.parent_id === parentId && i.name === name
-      );
-      if (!existing) {
-        const created = createApiOrFolder(target, { name, parentId, targetType: TARGET_TYPE.FOLDER });
-        const refreshed = readApiIndex(target);
-        index.items = refreshed.items;
-        existing = index.items.find((i) => i.target_id === created.target_id);
-      }
-      folderCache.set(key, existing.target_id);
-      parentId = existing.target_id;
-    }
-    return parentId;
-  };
-
-  const results = { created: [], updated: [], skipped: [], deleted: [] };
-
-  for (const item of parsed.items) {
-    const parentId = ensureFolderPath(item.folderPath);
-    const method = item.method;
-    const url = item.url;
-
-    const sameUrlAndFolder = index.items.find(
-      (i) =>
-        i.target_type === TARGET_TYPE.API &&
-        String(i.method || '').toUpperCase() === method &&
-        i.url === url &&
-        i.parent_id === parentId
-    );
-    const sameUrl = index.items.find(
-      (i) => i.target_type === TARGET_TYPE.API && String(i.method || '').toUpperCase() === method && i.url === url
-    );
-
-    const scripts = scriptMap.get(`${method}_${url}`) || scriptMap.get(`${method}_${item.url}`);
-    const preTask = scripts?.pre_script
-      ? { name: '', type: 'customScript', data: String(scripts.pre_script), enabled: 1, id: `${Date.now()}p` }
-      : null;
-    const postTask = scripts?.post_script
-      ? { name: '', type: 'customScript', data: String(scripts.post_script), enabled: 1, id: `${Date.now()}q` }
-      : null;
-
-    const buildDetail = (targetId, existingData) => ({
-      ...(existingData || {}),
-      attribute_info: existingData?.attribute_info || {},
-      description: item.description || existingData?.description || '',
-      is_locked: -1,
-      mark_id: existingData?.mark_id || '1',
-      method,
-      name: item.name,
-      parent_id: parentId,
-      project_id: args.project_id,
-      protocol: 'http/1.1',
-      request: {
-        auth: existingData?.request?.auth || buildEmptyAuth(),
-        body: item.request.body || buildBlankBody(),
-        cookie: item.request.cookie,
-        header: item.request.header,
-        post_tasks: postTask
-          ? [...(existingData?.request?.post_tasks || []).filter((t) => t?.id !== postTask.id), postTask]
-          : existingData?.request?.post_tasks || [],
-        pre_tasks: preTask
-          ? [...(existingData?.request?.pre_tasks || []).filter((t) => t?.id !== preTask.id), preTask]
-          : existingData?.request?.pre_tasks || [],
-        query: item.request.query,
-        restful: item.request.restful
-      },
-      response: item.response,
-      sort: existingData?.sort ?? 1000,
-      status: 1,
-      tags: item.tags,
-      target_id: targetId,
-      target_type: TARGET_TYPE.API,
-      url,
-      version: (existingData?.version || 1) + 1
-    });
-
-    if (coverMode === 'ignore') {
-      if (sameUrl) {
-        results.skipped.push({ method, url, reason: '已存在相同方法和 URL' });
-        continue;
-      }
-    } else if (coverMode === 'url_and_folder') {
-      if (sameUrlAndFolder) {
-        const existingFile = readApiFile(target, sameUrlAndFolder.target_id);
-        writeApiFile(target, sameUrlAndFolder.target_id, buildDetail(sameUrlAndFolder.target_id, existingFile?.data), {
-          ...sameUrlAndFolder,
-          name: item.name,
-          updated_at: now
-        });
-        index.items = readApiIndex(target).items;
-        results.updated.push({ target_id: sameUrlAndFolder.target_id, method, url });
-        continue;
-      }
-    } else if (coverMode === 'url') {
-      if (sameUrl) {
-        const existingFile = readApiFile(target, sameUrl.target_id);
-        writeApiFile(target, sameUrl.target_id, buildDetail(sameUrl.target_id, existingFile?.data), {
-          ...sameUrl,
-          name: item.name,
-          updated_at: now
-        });
-        index.items = readApiIndex(target).items;
-        results.updated.push({ target_id: sameUrl.target_id, method, url });
-        continue;
-      }
-    }
-    // both / clear / 未命中 -> 新建
-
-    const created = createApiOrFolder(target, {
-      name: item.name,
-      parentId,
-      targetType: TARGET_TYPE.API,
-      method,
-      url,
-      detail: {
-        ...item,
-        request: {
-          ...item.request,
-          pre_tasks: preTask ? [preTask] : [],
-          post_tasks: postTask ? [postTask] : []
-        }
-      }
-    });
-    index.items = readApiIndex(target).items;
-    results.created.push({ target_id: created.target_id, method, url });
-  }
+  const results = applyImportItems(target, {
+    projectId: args.project_id,
+    items: parsed.items,
+    folderId,
+    coverMode,
+    scriptMap: buildScriptMap(args.api_scripts)
+  });
 
   return {
     project_id: args.project_id,
@@ -431,11 +256,11 @@ export function apipost_sync_openapi(ctx, args) {
 
 /* ------------------------- 执行 ------------------------- */
 
-export async function apipost_execute_api(ctx, args) {
+export async function apimcp_execute_api(ctx, args) {
   ctx.assertExecutable(args.project_id);
   const preferred = ctx.config.preferred_env?.[args.project_id];
   return runApi({
-    officialRoot: ctx.officialRoot,
+    dataRoot: ctx.dataRoot,
     projectId: args.project_id,
     targetId: args.target_id,
     input: args.input || {},
@@ -445,11 +270,11 @@ export async function apipost_execute_api(ctx, args) {
   });
 }
 
-export async function apipost_execute_flow(ctx, args) {
+export async function apimcp_execute_flow(ctx, args) {
   ctx.assertExecutable(args.project_id);
   const preferred = ctx.config.preferred_env?.[args.project_id];
   return runFlow({
-    officialRoot: ctx.officialRoot,
+    dataRoot: ctx.dataRoot,
     projectId: args.project_id,
     flowId: args.flow_id,
     envId: args.environment_id,
@@ -460,7 +285,7 @@ export async function apipost_execute_flow(ctx, args) {
 
 /* ------------------------- 环境 ------------------------- */
 
-export function apipost_list_environments(ctx, args) {
+export function apimcp_list_environments(ctx, args) {
   const target = ctx.assertAllowed(args.project_id);
   const envs = listEnvironments(target);
   const preferred = ctx.config.preferred_env?.[args.project_id];
@@ -477,7 +302,7 @@ export function apipost_list_environments(ctx, args) {
   };
 }
 
-export function apipost_switch_environment(ctx, args) {
+export function apimcp_switch_environment(ctx, args) {
   const target = ctx.assertWritable(args.project_id);
   const env = assertEnv(target, args.environment_id);
   writeCurrentEnvId(target, env.env_id);
@@ -491,7 +316,7 @@ export function apipost_switch_environment(ctx, args) {
   };
 }
 
-export function apipost_create_environment(ctx, args) {
+export function apimcp_create_environment(ctx, args) {
   const target = ctx.assertWritable(args.project_id);
   const env = createEnvironment(target, { name: args.name, baseUrl: args.base_url });
   return {
@@ -501,7 +326,7 @@ export function apipost_create_environment(ctx, args) {
   };
 }
 
-export function apipost_update_environment(ctx, args) {
+export function apimcp_update_environment(ctx, args) {
   const target = ctx.assertWritable(args.project_id);
   const env = updateEnvironment(target, args.environment_id, {
     name: args.name,
@@ -510,18 +335,18 @@ export function apipost_update_environment(ctx, args) {
   return { environment: shapeEnv(env, env.env_id) };
 }
 
-export function apipost_delete_environment(ctx, args) {
+export function apimcp_delete_environment(ctx, args) {
   if (args.confirm !== true) throw new Error('删除环境必须显式传入 confirm: true');
   const target = ctx.assertWritable(args.project_id);
   return deleteEnvironment(target, args.environment_id);
 }
 
-export function apipost_list_environment_servers(ctx, args) {
+export function apimcp_list_environment_servers(ctx, args) {
   const target = ctx.assertAllowed(args.project_id);
   return { project_id: args.project_id, ...listEnvironmentServers(target, args.environment_id) };
 }
 
-export function apipost_create_environment_server(ctx, args) {
+export function apimcp_create_environment_server(ctx, args) {
   const target = ctx.assertWritable(args.project_id);
   const created = createEnvironmentServer(target, {
     name: args.name,
@@ -531,7 +356,7 @@ export function apipost_create_environment_server(ctx, args) {
   return { server: created };
 }
 
-export function apipost_update_environment_server(ctx, args) {
+export function apimcp_update_environment_server(ctx, args) {
   const target = ctx.assertWritable(args.project_id);
   const updated = updateEnvironmentServer(target, {
     serverId: args.server_id,
@@ -542,7 +367,7 @@ export function apipost_update_environment_server(ctx, args) {
   return { server: updated };
 }
 
-export function apipost_delete_environment_server(ctx, args) {
+export function apimcp_delete_environment_server(ctx, args) {
   if (args.confirm !== true) throw new Error('删除服务必须显式传入 confirm: true');
   const target = ctx.assertWritable(args.project_id);
   return deleteEnvironmentServer(target, args.server_id);
@@ -550,12 +375,12 @@ export function apipost_delete_environment_server(ctx, args) {
 
 /* ------------------------- 变量 ------------------------- */
 
-export function apipost_get_environment_variables(ctx, args) {
+export function apimcp_get_environment_variables(ctx, args) {
   const target = ctx.assertAllowed(args.project_id);
   return { project_id: args.project_id, ...getEnvironmentVariables(target, args.environment_id) };
 }
 
-export function apipost_upsert_environment_variable(ctx, args) {
+export function apimcp_upsert_environment_variable(ctx, args) {
   const target = ctx.assertWritable(args.project_id);
   return upsertEnvVariable(target, {
     envId: args.environment_id,
@@ -566,17 +391,17 @@ export function apipost_upsert_environment_variable(ctx, args) {
   });
 }
 
-export function apipost_delete_environment_variable(ctx, args) {
+export function apimcp_delete_environment_variable(ctx, args) {
   if (args.confirm !== true) throw new Error('删除环境变量必须显式传入 confirm: true');
   const target = ctx.assertWritable(args.project_id);
   return deleteEnvVariable(target, { envId: args.environment_id, key: args.key });
 }
 
-export function apipost_get_global_variables(ctx, args) {
+export function apimcp_get_global_variables(ctx, args) {
   const target = ctx.assertAllowed(args.project_id);
   return { project_id: args.project_id, ...getGlobalVariables(target) };
 }
-export function apipost_upsert_global_variable(ctx, args) {
+export function apimcp_upsert_global_variable(ctx, args) {
   const target = ctx.assertWritable(args.project_id);
   return upsertGlobalVariable(target, {
     key: args.key,
@@ -586,7 +411,7 @@ export function apipost_upsert_global_variable(ctx, args) {
   });
 }
 
-export function apipost_delete_global_variable(ctx, args) {
+export function apimcp_delete_global_variable(ctx, args) {
   if (args.confirm !== true) throw new Error('删除全局变量必须显式传入 confirm: true');
   const target = ctx.assertWritable(args.project_id);
   return deleteGlobalVariable(target, { key: args.key });
@@ -594,7 +419,7 @@ export function apipost_delete_global_variable(ctx, args) {
 
 /* ------------------------- 全局参数 ------------------------- */
 
-export function apipost_get_global_params(ctx, args) {
+export function apimcp_get_global_params(ctx, args) {
   const target = ctx.assertAllowed(args.project_id);
   return {
     project_id: args.project_id,
@@ -603,7 +428,7 @@ export function apipost_get_global_params(ctx, args) {
   };
 }
 
-export function apipost_update_global_params(ctx, args) {
+export function apimcp_update_global_params(ctx, args) {
   const target = ctx.assertWritable(args.project_id);
   const patch = {};
   for (const key of ['header', 'query', 'cookie', 'body', 'auth', 'pre_tasks', 'post_tasks']) {
@@ -617,7 +442,7 @@ export function apipost_update_global_params(ctx, args) {
     project_id: args.project_id,
     params,
     updated_sections: Object.keys(patch),
-    note: '全局参数已保存到 API 单机版项目，其他客户端即可读到。'
+    note: '全局参数已保存到项目数据目录。'
   };
 }
 
@@ -671,7 +496,7 @@ function buildStepsFromArgs(target, steps, { existingSteps = null } = {}) {
   return out;
 }
 
-export function apipost_create_execution_flow(ctx, args) {
+export function apimcp_create_execution_flow(ctx, args) {
   const target = ctx.assertWritable(args.project_id);
   const steps = buildStepsFromArgs(target, args.steps);
   const flow = createFlow(target, {
@@ -690,7 +515,7 @@ export function apipost_create_execution_flow(ctx, args) {
   };
 }
 
-export function apipost_update_execution_flow(ctx, args) {
+export function apimcp_update_execution_flow(ctx, args) {
   const target = ctx.assertWritable(args.project_id);
   const current = assertFlow(target, args.flow_id);
   const steps = args.steps !== undefined ? buildStepsFromArgs(target, args.steps, { existingSteps: current.steps }) : undefined;
@@ -709,24 +534,24 @@ export function apipost_update_execution_flow(ctx, args) {
   };
 }
 
-export function apipost_list_execution_flows(ctx, args) {
+export function apimcp_list_execution_flows(ctx, args) {
   const target = ctx.assertAllowed(args.project_id);
   return { project_id: args.project_id, flows: listFlows(target) };
 }
 
-export function apipost_get_execution_flow(ctx, args) {
+export function apimcp_get_execution_flow(ctx, args) {
   const target = ctx.assertAllowed(args.project_id);
   const flow = assertFlow(target, args.flow_id);
   return { project_id: args.project_id, flow };
 }
 
-export function apipost_delete_execution_flow(ctx, args) {
+export function apimcp_delete_execution_flow(ctx, args) {
   if (args.confirm !== true) throw new Error('删除执行计划必须显式传入 confirm: true');
   const target = ctx.assertWritable(args.project_id);
   return deleteFlow(target, args.flow_id);
 }
 
-export function apipost_list_execution_runs(ctx, args) {
+export function apimcp_list_execution_runs(ctx, args) {
   const target = ctx.assertAllowed(args.project_id);
   const result = listRuns(target, {
     scope: args.scope,
@@ -738,47 +563,79 @@ export function apipost_list_execution_runs(ctx, args) {
   return { project_id: args.project_id, ...result };
 }
 
-export function apipost_get_execution_result(ctx, args) {
+export function apimcp_get_execution_result(ctx, args) {
   const target = ctx.assertAllowed(args.project_id);
   const run = assertRun(target, args.run_id);
   return { project_id: args.project_id, run };
 }
 
+/* ------------------------- 导入 / 导出 ------------------------- */
+
+export function apimcp_import_project(ctx, args) {
+  const target = ctx.assertWritable(args.project_id);
+  if (!args.payload) throw new Error('缺少 payload：请传入待导入的文档内容');
+  return importIntoProject(target, {
+    projectId: args.project_id,
+    format: args.format || 'auto',
+    payload: args.payload,
+    folderId: args.folder_id || '0',
+    coverMode: args.api_cover_mode || 'url_and_folder',
+    basePath: Boolean(args.base_path)
+  });
+}
+
+export function apimcp_export_project(ctx, args) {
+  const target = ctx.assertAllowed(args.project_id);
+  const result = exportProject(target, {
+    projectId: args.project_id,
+    format: args.format || 'openapi'
+  });
+  return {
+    project_id: args.project_id,
+    format: result.format,
+    filename: result.filename,
+    mime: result.mime,
+    content: result.content
+  };
+}
+
 /* ------------------------- 分发 ------------------------- */
 
 const HANDLERS = {
-  apipost_list_projects,
-  apipost_create_project,
-  apipost_list_apis,
-  apipost_get_api_detail,
-  apipost_sync_openapi,
-  apipost_delete_apis,
-  apipost_execute_api,
-  apipost_list_environments,
-  apipost_switch_environment,
-  apipost_create_environment,
-  apipost_update_environment,
-  apipost_delete_environment,
-  apipost_list_environment_servers,
-  apipost_create_environment_server,
-  apipost_update_environment_server,
-  apipost_delete_environment_server,
-  apipost_get_environment_variables,
-  apipost_upsert_environment_variable,
-  apipost_delete_environment_variable,
-  apipost_get_global_variables,
-  apipost_upsert_global_variable,
-  apipost_delete_global_variable,
-  apipost_get_global_params,
-  apipost_update_global_params,
-  apipost_create_execution_flow,
-  apipost_update_execution_flow,
-  apipost_list_execution_flows,
-  apipost_get_execution_flow,
-  apipost_delete_execution_flow,
-  apipost_execute_flow,
-  apipost_list_execution_runs,
-  apipost_get_execution_result
+  apimcp_list_projects,
+  apimcp_create_project,
+  apimcp_list_apis,
+  apimcp_get_api_detail,
+  apimcp_sync_openapi,
+  apimcp_delete_apis,
+  apimcp_execute_api,
+  apimcp_list_environments,
+  apimcp_switch_environment,
+  apimcp_create_environment,
+  apimcp_update_environment,
+  apimcp_delete_environment,
+  apimcp_list_environment_servers,
+  apimcp_create_environment_server,
+  apimcp_update_environment_server,
+  apimcp_delete_environment_server,
+  apimcp_get_environment_variables,
+  apimcp_upsert_environment_variable,
+  apimcp_delete_environment_variable,
+  apimcp_get_global_variables,
+  apimcp_upsert_global_variable,
+  apimcp_delete_global_variable,
+  apimcp_get_global_params,
+  apimcp_update_global_params,
+  apimcp_create_execution_flow,
+  apimcp_update_execution_flow,
+  apimcp_list_execution_flows,
+  apimcp_get_execution_flow,
+  apimcp_delete_execution_flow,
+  apimcp_execute_flow,
+  apimcp_list_execution_runs,
+  apimcp_get_execution_result,
+  apimcp_import_project,
+  apimcp_export_project
 };
 
 export const HANDLER_NAMES = Object.keys(HANDLERS);

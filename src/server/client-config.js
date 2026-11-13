@@ -27,8 +27,8 @@ export function buildClientConfigs({ command, args = [], serverName = 'apimcp' }
       `args = ${JSON.stringify(args)}`,
       '',
       `[mcp_servers.${serverName}.env]`,
-      `# ApiPost 数据目录（可选，覆盖自动探测）`,
-      `# APIPOST_DATA_ROOT = "${path.join(process.env.APPDATA || '', 'Apipost单机版').replace(/\\/g, '\\\\')}"`
+      `# 数据目录（可选，覆盖默认的 %APPDATA%\\ApiMCP\\data）`,
+      `# APIMCP_DATA_ROOT = "${path.join(process.env.APPDATA || '', 'ApiMCP', 'data').replace(/\\/g, '\\\\')}"`
     ].join('\n'),
     http: JSON.stringify(
       {

@@ -32,7 +32,7 @@ function envContext(target, env) {
 
 /** 单接口执行 */
 export async function runApi({
-  officialRoot,
+  dataRoot,
   projectId,
   targetId,
   input = {},
@@ -46,7 +46,7 @@ export async function runApi({
   /** 仅控制台「发送」需要：带回未脱敏的完整请求 / 响应详情（不落盘） */
   includeLiveDetail = false
 }) {
-  const target = openProject({ officialRoot, projectId });
+  const target = openProject({ dataRoot, projectId });
   const item = findApiItem(target, targetId);
   if (!item) throw new Error(`接口不存在：${targetId}`);
   if (item.target_type !== TARGET_TYPE.API) {
@@ -128,8 +128,8 @@ export async function runApi({
     assertions: result.assertions,
     message:
       run.status === 'passed'
-        ? `接口执行通过，run_id=${run.run_id}。使用 apipost_get_execution_result 查看完整请求/响应。`
-        : `接口执行失败：${result.error || '未知错误'}。使用 apipost_get_execution_result 查看详情。`
+        ? `接口执行通过，run_id=${run.run_id}。使用 apimcp_get_execution_result 查看完整请求/响应。`
+        : `接口执行失败：${result.error || '未知错误'}。使用 apimcp_get_execution_result 查看详情。`
   };
 
   if (includeBinary) {
@@ -148,7 +148,7 @@ export async function runApi({
 
 /** 执行计划 */
 export async function runFlow({
-  officialRoot,
+  dataRoot,
   projectId,
   flowId,
   envId,
@@ -157,7 +157,7 @@ export async function runFlow({
   fetchImpl,
   timeoutMs
 }) {
-  const target = openProject({ officialRoot, projectId });
+  const target = openProject({ dataRoot, projectId });
   const flow = assertFlow(target, flowId);
   const env = resolveEnvironment(target, { envId: envId || flow.environment_id, preferredEnvId });
   const ctx = envContext(target, env);

@@ -8,7 +8,7 @@ import { handleMessage } from '../mcp/protocol.js';
 import { TOOLS } from '../mcp/schemas.js';
 import { saveConfig, publicConfig, regenerateToken, DEFAULT_PORT } from './config.js';
 import { buildClientConfigs } from './client-config.js';
-import { listProjects } from '../store/projects.js';
+import { listProjects, createProject } from '../store/projects.js';
 import { openProject } from '../store/target.js';
 import {
   buildApiTree,
@@ -50,7 +50,10 @@ import { listFlows } from '../store/flows.js';
 import { listRuns, getRun } from '../store/runs.js';
 import { checkExpectedHeaders } from '../exec/http.js';
 import { listRecentlySaved, listRecentRuns } from '../store/recent.js';
-import { detectOfficialRoot, isOfficialRoot } from '../store/paths.js';
+import { canWriteDir } from '../store/paths.js';
+import { previewImport, importIntoProject } from '../io/import.js';
+import { exportProject } from '../io/export.js';
+import { VERSION } from '../version.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = path.resolve(here, '../../web');
@@ -144,10 +147,10 @@ function uiTokenFrom(req) {
  * 启动本地 HTTP 服务。
  * @param {object} opts
  * @param {object} opts.config  已加载配置（可变，保存时写盘）
- * @param {string} opts.officialRoot
+ * @param {string} opts.dataRoot  本软件数据根（已由 ensureDataRoot 初始化）
  */
-export function createServer({ config, officialRoot, log = () => {} }) {
-  const ctx = new ToolContext({ officialRoot, config });
+export function createServer({ config, dataRoot, log = () => {} }) {
+  const ctx = new ToolContext({ dataRoot, config });
   const startedAt = Date.now();
   let requestCount = 0;
   let lastMcpCallAt = '';
@@ -235,7 +238,7 @@ export function createServer({ config, officialRoot, log = () => {} }) {
       res.end(readWebAsset('index.html'));
       return;
     }
-    if (req.method === 'GET' && /^\/(app|design|envvars|extra|recent|curl-parse|curl-build|theme|style)\.(js|css)$/.test(pathname)) {
+    if (req.method === 'GET' && /^\/(app|design|envvars|extra|recent|transfer|curl-parse|curl-build|theme|style)\.(js|css)$/.test(pathname)) {
       const name = pathname.slice(1);
       try {
         const content = readWebAsset(name);
@@ -271,6 +274,7 @@ export function createServer({ config, officialRoot, log = () => {} }) {
     const api = pathname.replace(/^\/api\/?/, '');
 
     if (api === 'status' && req.method === 'GET') {
+      const writable = canWriteDir(dataRoot);
       return sendJson(res, 200, {
         enabled: config.enabled,
         allow_write: config.allow_write !== false,
@@ -280,11 +284,13 @@ export function createServer({ config, officialRoot, log = () => {} }) {
         uptime_ms: Date.now() - startedAt,
         requests: requestCount,
         last_mcp_call_at: lastMcpCallAt,
-        official_root: officialRoot,
-        official_root_ok: isOfficialRoot(officialRoot),
-        detected_root: detectOfficialRoot({ config }),
+        data_root: dataRoot,
+        data_root_ok: writable,
+        // 兼容旧版控制台与旧版桌面端的附着探测（2.0 起内部统一用 data_root）
+        official_root: dataRoot,
+        official_root_ok: writable,
         tool_count: TOOLS.length,
-        version: '1.0.0'
+        version: VERSION
       });
     }
 
@@ -329,36 +335,79 @@ export function createServer({ config, officialRoot, log = () => {} }) {
 
     if (api === 'client-config' && req.method === 'GET') {
       const exe = process.execPath;
+      // 跑在 Electron 里时 execPath 是桌面端自己，它不接受 --stdio，
+      // 这时要用同目录下的 apimcp.exe（打包时已一并放进来）
+      const isElectron = Boolean(process.versions.electron);
       // 打包版（SEA）：execPath 就是 apimcp.exe，直接传 --stdio
       // 开发版：execPath 是 node，需要把入口脚本路径补上
-      const isSea = !/^node(\.exe)?$/i.test(path.basename(exe));
-      const command = exe;
-      const args = isSea ? ['--stdio'] : [path.resolve(here, '../main.js'), '--stdio'];
+      const isNode = /^node(\.exe)?$/i.test(path.basename(exe));
+
+      let command;
+      let args;
+      if (isElectron) {
+        command = path.join(path.dirname(exe), 'apimcp.exe');
+        args = ['--stdio'];
+      } else if (isNode) {
+        command = exe;
+        args = [path.resolve(here, '../main.js'), '--stdio'];
+      } else {
+        command = exe;
+        args = ['--stdio'];
+      }
+
       return sendJson(res, 200, {
         command,
         args,
+        stdio_exe_exists: isElectron ? fs.existsSync(command) : true,
         configs: buildClientConfigs({ command, args })
       });
     }
 
     if (api === 'projects' && req.method === 'GET') {
       const allowed = config.allowed_project_ids || [];
-      const projects = listProjects(officialRoot).map((p) => ({
+      const projects = listProjects(dataRoot).map((p) => ({
         ...p,
         authorized: allowed.length === 0 || allowed.includes(p.project_id)
       }));
-      return sendJson(res, 200, { projects, official_root: officialRoot });
+      return sendJson(res, 200, { projects, data_root: dataRoot });
+    }
+
+    // 新建项目：空数据目录下控制台的唯一出路，建完自动授权
+    if (api === 'projects' && req.method === 'POST') {
+      const body = (await readBody(req)) || {};
+      try {
+        const created = createProject(dataRoot, {
+          name: body.name,
+          intro: body.intro || body.description || '',
+          storagePath: body.storage_path || null
+        });
+        if (!Array.isArray(config.allowed_project_ids)) config.allowed_project_ids = [];
+        if (!config.allowed_project_ids.includes(created.project_id)) {
+          config.allowed_project_ids.push(created.project_id);
+        }
+        saveConfig(config);
+        ctx.config = config;
+        return sendJson(res, 200, { ok: true, project: created });
+      } catch (err) {
+        return sendJson(res, 400, { error: err?.message || String(err) });
+      }
     }
 
     const projectMatch = api.match(/^projects\/([^/]+)(?:\/(.*))?$/);
     if (projectMatch) {
       const projectId = projectMatch[1];
       const action = projectMatch[2] || '';
-      const projectExists = listProjects(officialRoot).some((p) => p.project_id === projectId);
+      // 没有项目时前端可能拼出 /projects/null/...，给一句人能看懂的提示
+      if (!projectId || projectId === 'null' || projectId === 'undefined') {
+        return sendJson(res, 400, {
+          error: '还没有项目，请先在「总览」页点「新建项目」创建。'
+        });
+      }
+      const projectExists = listProjects(dataRoot).some((p) => p.project_id === projectId);
       if (!projectExists) return sendJson(res, 404, { error: `项目不存在：${projectId}` });
 
       if (action === 'tree' && req.method === 'GET') {
-        const target = openProject({ officialRoot, projectId });
+        const target = openProject({ dataRoot, projectId });
         return sendJson(res, 200, {
           project_id: projectId,
           tree: buildApiTree(target),
@@ -367,18 +416,18 @@ export function createServer({ config, officialRoot, log = () => {} }) {
       }
 
       if (action === 'flows' && req.method === 'GET') {
-        const target = openProject({ officialRoot, projectId });
+        const target = openProject({ dataRoot, projectId });
         return sendJson(res, 200, { project_id: projectId, flows: listFlows(target) });
       }
 
       if (action === 'runs' && req.method === 'GET') {
-        const target = openProject({ officialRoot, projectId });
+        const target = openProject({ dataRoot, projectId });
         return sendJson(res, 200, { project_id: projectId, ...listRuns(target, { limit: url.searchParams.get('limit') || 20 }) });
       }
 
       // ---------- 最近：最近保存 / 历史发送记录 ----------
       if (action === 'recent' && req.method === 'GET') {
-        const target = openProject({ officialRoot, projectId });
+        const target = openProject({ dataRoot, projectId });
         const kind = url.searchParams.get('kind') || 'saved';
         const keyword = url.searchParams.get('keyword') || '';
         const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit')) || 50));
@@ -398,7 +447,7 @@ export function createServer({ config, officialRoot, log = () => {} }) {
       }
 
       if (action === 'recent/runs' && req.method === 'GET') {
-        const target = openProject({ officialRoot, projectId });
+        const target = openProject({ dataRoot, projectId });
         const runId = url.searchParams.get('run_id');
         if (!runId) return sendJson(res, 400, { error: '缺少 run_id' });
         const run = getRun(target, runId);
@@ -410,7 +459,7 @@ export function createServer({ config, officialRoot, log = () => {} }) {
         const body = (await readBody(req)) || {};
         const { callTool } = await import('../mcp/tools.js');
         const result = await callTool(
-          'apipost_execute_api',
+          'apimcp_execute_api',
           { project_id: projectId, target_id: body.target_id, environment_id: body.environment_id, input: body.input || {} },
           ctx
         );
@@ -418,7 +467,7 @@ export function createServer({ config, officialRoot, log = () => {} }) {
       }
 
       // ---------- 接口编辑器：CRUD ----------
-      const projectTarget = () => openProject({ officialRoot, projectId });
+      const projectTarget = () => openProject({ dataRoot, projectId });
 
       if (action === 'apis/reorder' && req.method === 'POST') {
         const target = projectTarget();
@@ -524,7 +573,7 @@ export function createServer({ config, officialRoot, log = () => {} }) {
         const targetId = String(body.target_id || '');
         if (!targetId) return sendJson(res, 400, { error: '缺少 target_id' });
 
-        const target = openProject({ officialRoot, projectId });
+        const target = openProject({ dataRoot, projectId });
         const { listCases } = await import('../store/cases.js');
         const { runApi } = await import('../exec/runner.js');
         const { getRun } = await import('../store/runs.js');
@@ -547,7 +596,7 @@ export function createServer({ config, officialRoot, log = () => {} }) {
         for (const c of wanted) {
           try {
             const summary = await runApi({
-              officialRoot,
+              dataRoot,
               projectId,
               targetId,
               input: c.input || {},
@@ -661,7 +710,7 @@ export function createServer({ config, officialRoot, log = () => {} }) {
             progressTimeline.push({ done, total: total || 0, at_ms: now });
           };
           const result = await runStress({
-            officialRoot,
+            dataRoot,
             projectId,
             targetId: body.target_id,
             concurrency: body.concurrency,
@@ -724,8 +773,8 @@ export function createServer({ config, officialRoot, log = () => {} }) {
       if (action === 'mocks' && req.method === 'GET') {
         const { listMocks } = await import('../server/mock.js');
         const mocks = listMocks({
-          officialRoot,
-          projects: () => listProjects(officialRoot)
+          dataRoot,
+          projects: () => listProjects(dataRoot)
         });
         return sendJson(res, 200, {
           project_id: projectId,
@@ -938,7 +987,7 @@ export function createServer({ config, officialRoot, log = () => {} }) {
         const { getRun } = await import('../store/runs.js');
 
         const summary = await runApi({
-          officialRoot,
+          dataRoot,
           projectId,
           targetId,
           input: body.input || {},
@@ -949,7 +998,7 @@ export function createServer({ config, officialRoot, log = () => {} }) {
           includeLiveDetail: true
         });
 
-        const runTarget = openProject({ officialRoot, projectId });
+        const runTarget = openProject({ dataRoot, projectId });
         const run = getRun(runTarget, summary.run_id);
         const step = run?.steps?.[0] || null;
 
@@ -1050,6 +1099,66 @@ export function createServer({ config, officialRoot, log = () => {} }) {
           return sendJson(res, 200, { ok: true, ...result, deleted_count: result.deleted_ids.length });
         }
       }
+
+      // ---------- 导入 / 导出 ----------
+      if (action === 'import' && req.method === 'POST') {
+        const body = (await readBody(req)) || {};
+        if (!body.payload) return sendJson(res, 400, { error: '缺少 payload：请上传文件或粘贴内容' });
+        try {
+          const target = projectTarget();
+          const result = importIntoProject(target, {
+            projectId,
+            format: body.format || 'auto',
+            payload: body.payload,
+            folderId: body.folder_id || '0',
+            coverMode: body.api_cover_mode || 'url_and_folder',
+            basePath: Boolean(body.base_path)
+          });
+          return sendJson(res, 200, { ok: true, ...result });
+        } catch (err) {
+          return sendJson(res, 400, { error: err?.message || String(err) });
+        }
+      }
+
+      if (action === 'export' && req.method === 'GET') {
+        const format = url.searchParams.get('format') || 'openapi';
+        try {
+          const target = projectTarget();
+          const meta = listProjects(dataRoot).find((p) => p.project_id === projectId);
+          const result = exportProject(target, {
+            projectId,
+            projectName: meta?.name,
+            format
+          });
+          const encoded = encodeURIComponent(result.filename);
+          res.writeHead(200, {
+            'Content-Type': result.mime,
+            'Content-Disposition': `attachment; filename="${encoded}"; filename*=UTF-8''${encoded}`,
+            'Cache-Control': 'no-store',
+            'Content-Length': Buffer.byteLength(result.content)
+          });
+          res.end(result.content);
+          return;
+        } catch (err) {
+          return sendJson(res, 400, { error: err?.message || String(err) });
+        }
+      }
+    }
+
+    // 导入预览：不落库，只解析。放在项目路由之外，前端可以先预览再选目标项目。
+    if (api === 'import/preview' && req.method === 'POST') {
+      const body = (await readBody(req)) || {};
+      if (!body.payload) return sendJson(res, 400, { error: '缺少 payload：请上传文件或粘贴内容' });
+      try {
+        const preview = previewImport({
+          format: body.format || 'auto',
+          payload: body.payload,
+          basePath: Boolean(body.base_path)
+        });
+        return sendJson(res, 200, { ok: true, ...preview });
+      } catch (err) {
+        return sendJson(res, 400, { error: err?.message || String(err) });
+      }
     }
 
     if (api === 'tools' && req.method === 'GET') {
@@ -1124,7 +1233,7 @@ export function createServer({ config, officialRoot, log = () => {} }) {
         } catch {}
         mockService = null;
       }
-      const instance = createMockServer({ officialRoot, config, log });
+      const instance = createMockServer({ dataRoot, config, log });
       const address = await instance.listen(mockPort);
       mockService = instance;
       const actualPort = typeof address === 'object' && address ? address.port : mockPort;

@@ -6,6 +6,7 @@
  *  - attached 端口已被同款服务占用（通常是常驻的 apimcp.exe），
  *             用同样的 ui_token 校验通过后只开窗口，不接管、不关闭对方的服务。
  */
+import path from 'node:path';
 
 /** 端口被占用 */
 export class PortInUseError extends Error {
@@ -29,11 +30,12 @@ function withTimeout(ms) {
 
 /**
  * 探测端口上是否已有可用的 API MCP 服务。
- * 判定标准：/api/status 用 ui_token 校验通过（200），说明是我们自己的控制台服务。
+ * 判定标准：/api/status 用 ui_token 校验通过（200），说明是我们自己的控制台服务；
+ * 若给了 expectedDataRoot，还要求对方读写的正是同一个数据根，否则附着会看错数据。
  *
  * @returns {Promise<boolean>}
  */
-export async function probeService({ port, uiToken, host = '127.0.0.1', timeoutMs = 1500 } = {}) {
+export async function probeService({ port, uiToken, expectedDataRoot, host = '127.0.0.1', timeoutMs = 1500 } = {}) {
   if (!port) return false;
   const { signal, done } = withTimeout(timeoutMs);
   try {
@@ -43,12 +45,23 @@ export async function probeService({ port, uiToken, host = '127.0.0.1', timeoutM
     });
     if (res.status !== 200) return false;
     const body = await res.json().catch(() => null);
-    return Boolean(body && typeof body === 'object' && 'tool_count' in body);
+    if (!body || typeof body !== 'object' || !('tool_count' in body)) return false;
+    if (expectedDataRoot) {
+      const served = String(body.data_root || body.official_root || '');
+      if (served && samePath(served, expectedDataRoot) === false) return false;
+    }
+    return true;
   } catch {
     return false;
   } finally {
     done();
   }
+}
+
+/** Windows 路径大小写不敏感，比较前统一规范化 */
+function samePath(a, b) {
+  const norm = (p) => path.resolve(String(p)).replace(/[\\/]+$/, '').toLowerCase();
+  return norm(a) === norm(b);
 }
 
 function buildUiUrl({ port, uiToken, host = '127.0.0.1' }) {
@@ -60,7 +73,7 @@ function buildUiUrl({ port, uiToken, host = '127.0.0.1' }) {
  *
  * @param {object} opts
  * @param {object} opts.config        已加载配置（可变）
- * @param {string} opts.officialRoot
+ * @param {string} opts.dataRoot      本软件数据根（用于校验附着对象是否同源）
  * @param {number} opts.port          期望端口
  * @param {Function} opts.createServer () => 服务实例（依赖注入，便于测试）
  * @param {Function} [opts.log]
@@ -69,7 +82,7 @@ function buildUiUrl({ port, uiToken, host = '127.0.0.1' }) {
  */
 export async function startOrAttach({
   config,
-  officialRoot,
+  dataRoot,
   port,
   createServer,
   log = () => {}
@@ -94,7 +107,7 @@ export async function startOrAttach({
     } catch {}
 
     if (err.code === 'EADDRINUSE') {
-      if (await probeService({ port, uiToken, host })) {
+      if (await probeService({ port, uiToken, expectedDataRoot: dataRoot, host })) {
         log(`[desktop] 端口 ${port} 上已有 API MCP 服务，使用附着模式`);
         return {
           mode: 'attached',
@@ -105,7 +118,10 @@ export async function startOrAttach({
           close: async () => {}
         };
       }
-      throw new PortInUseError(port);
+      throw new PortInUseError(
+        port,
+        dataRoot ? `同款服务在跑，但它用的数据目录不是 ${dataRoot}` : ''
+      );
     }
     throw err;
   }

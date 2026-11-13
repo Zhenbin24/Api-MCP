@@ -97,11 +97,12 @@ async function inject({ blob, outExe }) {
 }
 
 function writeReadme() {
-  const text = `API MCP v1.0.0
+  const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
+  const text = `API MCP v${version}
 ==================
 
-一个兼容 Apipost 单机版 30 个 MCP 工具的本地服务（Windows）。
-所有改动直接写入 Apipost 官方数据目录，无需手动同步。
+一个自带数据目录的本地 API 设计 / 调试工具（Windows），内置 MCP 服务。
+所有改动直接落在本软件自己的数据目录，无需任何外部软件、无需手动同步。
 
 一、直接双击运行
 ----------------
@@ -112,29 +113,29 @@ function writeReadme() {
 token 不能漏（没有它打不开控制台）：
 
   API MCP 服务已启动
-  数据目录: C:\\Users\\<你>\\AppData\\Roaming\\Apipost单机版
+  数据目录: C:\\Users\\<你>\\AppData\\Roaming\\ApiMCP\\data（首次已初始化）
   控制台  : http://127.0.0.1:39100/?ui=xxxxxxxx
   MCP 端点: http://127.0.0.1:39100/mcp
   Token   : xxxxxxxx
 
-注意：这是一个前台进程，黑框关了服务就停了。想常驻见第六节。
+注意：这是一个前台进程，黑框关了服务就停了。想常驻见第七节。
 
 二、首次使用建议顺序
 --------------------
-1) 先安装并打开一次 API 单机版（Apipost 离线版），让数据落到
-   %APPDATA%\\Apipost单机版\\ ；数据不在默认位置时用 --data-root 指定。
-2) 双击 apimcp.exe，浏览器会自动打开控制台。
-3) 控制台「总览」把「运行状态」开关打开（服务默认关闭，
+1) 双击 apimcp.exe，浏览器会自动打开控制台（首次会自动建数据目录，
+   并创建一个名为「默认项目」的项目，打开就能直接写接口）。
+2) 「总览」把「运行状态」开关打开（服务默认关闭，
    关闭时 HTTP 与 stdio 都会被拒绝，只影响接入、不影响控制台本身）。
-4) 确认数据目录探测成功。
-5) 勾选要开放给 MCP 的项目，然后就可以开始编辑。
-6) 改完接口保存即写入 API 单机版，重新进入项目即可看到。
+3) 勾选要开放给 MCP 的项目，然后就可以开始设计接口。
+4) 改完接口保存即时生效，不需要任何同步步骤。
+5) 「默认项目」可以直接改名或删除，也可以在「总览」用「新建项目」建更多。
 
 三、想要独立窗口（桌面端）
 --------------------------
   dist\\desktop\\ApiMCP-Desktop-win32-x64\\ApiMCP-Desktop.exe
 双击即用，无地址栏无标签页，关窗口等于关这个软件。
-分发时必须整个目录一起拷（约 350MB，Electron 运行时在同目录的 dll 和 locales 里）。
+分发时必须整个目录一起拷（约 360MB，Electron 运行时在同目录的 dll 和 locales 里）。
+该目录内已附带 apimcp.exe，对方拿到后既是窗口版也是 stdio 版。
 
 它和本 exe 的关系：
   39100 端口空闲        → 桌面端自己起服务，关窗口即停服务
@@ -161,7 +162,7 @@ command 必须写绝对路径；改完要重启客户端。
   apimcp.exe --stdio                   作为 stdio MCP 服务运行
   apimcp.exe --serve                   只启动 HTTP 服务，不打开浏览器
   apimcp.exe --no-open                 不自动开浏览器，其余同无参数
-  apimcp.exe --data-root "D:\\data"    指定 Apipost 数据目录
+  apimcp.exe --data-root "D:\\data"    指定数据目录（默认 %APPDATA%\\ApiMCP\\data）
   apimcp.exe --port 39101              换端口
   apimcp.exe --version                 显示版本
   apimcp.exe --help                    查看帮助
@@ -172,12 +173,14 @@ command 必须写绝对路径；改完要重启客户端。
 
 六、数据在哪（重要）
 ---------------------
-官方数据（读写）：%APPDATA%\\Apipost单机版\\
-本软件配置：      %APPDATA%\\ApiMCP\\config.json
+数据目录：  %APPDATA%\\ApiMCP\\data\\
+本软件配置：%APPDATA%\\ApiMCP\\config.json
 
-- AI 与控制器件的所有改动都直接写入 Apipost 官方目录，不经过中间层
-- 保存后重新进入 API 单机版的项目即可看到改动
+- 首次启动会自动创建数据目录和一个「默认项目」，不需要任何前置准备
+- AI 与控制台的所有改动都直接写进这个目录，保存即生效
 - 不需要手动「拉取 / 推送」
+- 「默认项目」只在首次初始化时创建一次，删光项目后重启不会自动重现
+- 想做成绿色版：启动前设置 APIMCP_HOME=<你的目录>，配置与数据都会跟着走
 
 七、开机自启（可选）
 --------------------
@@ -195,19 +198,18 @@ Win+R 输入 shell:startup，把 apimcp.exe 的快捷方式放进去。
   地址必须带 ?ui=<token>。token 在启动时的终端输出里，也能在
   %APPDATA%\\ApiMCP\\config.json 的 ui_token 字段找到。
 
-显示「未找到 API 单机版数据目录」
-  先安装并打开一次 API 单机版；数据不在默认位置时用 --data-root 指定，
-  或在控制台「外观设置 → 数据目录」里填。
+控制台提示「数据目录不可用」
+  说明目录无法创建或没有写权限。在「外观设置 → 数据目录」里换一个可写目录，
+  或用 --data-root 指定后重启。
 
-改了接口但 API 单机版里没变
-  多半是 API 单机版没重新进入该项目。关掉项目重开一次即可。
+升级到 2.0 后工具的调用名从 apipost_* 改成了 apimcp_*，
+客户端里的 mcp.json 一般不用改（服务名没变），但写死了旧工具名的提示词要跟着换。
 
-九、说明
---------
-本软件与 Apipost 官方无隶属关系，仅按官方 MCP 工具语义操作你本机的
-Apipost 单机版项目数据。
+升级到 2.0 后数据目录改成了 %APPDATA%\\ApiMCP\\data，不再读写 Apipost 单机版的目录，
+也不做自动迁移。要沿用旧数据，用 --data-root 指过去，或把旧目录里的
+offline-projects.json / offline-data / offline-data-local 拷进新目录。
 `;
-  const target = path.join(dist, 'README.txt');
+    const target = path.join(dist, 'README.txt');
   fs.writeFileSync(target, text, 'utf8');
   log('生成 README.txt');
 }

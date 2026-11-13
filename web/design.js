@@ -801,13 +801,81 @@ function paramSection(title, holder, key, onChange = markDirty) {
  */
 function tabParams(request = editor.data.request, onChange = markDirty, opts = {}) {
   const req = request;
-  const sections = opts.sections || ['query', 'restful', 'header', 'cookie'];
+  const sections = opts.sections || ['query', 'restful', 'header'];
   const parts = [];
   if (sections.includes('query')) parts.push(paramSection('Query 参数', req.query, 'query', onChange));
   if (sections.includes('restful')) parts.push(paramSection('Path 参数', req.restful, 'restful', onChange));
   if (sections.includes('header')) parts.push(paramSection('Header 参数', req.header, 'header', onChange));
-  if (sections.includes('cookie')) parts.push(paramSection('Cookie 参数', req.cookie, 'cookie', onChange));
+  // Cookie 不再单独建表：历史数据仅提示 + 引导迁移到 Header
+  parts.push(cookieNotice(req.cookie, onChange));
+  parts.push(
+    h('div', { class: 'param-sections-hint hint' }, '参数值支持 {{变量名}}；Cookie 请写成 Header：Key = Cookie，Value = a=1; b=2')
+  );
   return h('div', { class: 'param-sections' }, ...parts.filter(Boolean));
+}
+
+/**
+ * Cookie 历史数据提示：Cookie 参数表已从界面移除，旧数据仍在发送时拼进 Cookie 头。
+ * 提供「复制为 Cookie 头」与「清空」，不自动改动用户数据。
+ * @param {object} holder cookie 配置对象 { parameter: [] }
+ * @param {function} onChange 变更回调
+ */
+function cookieNotice(holder, onChange = markDirty) {
+  if (!holder || !Array.isArray(holder.parameter) || holder.parameter.length === 0) return null;
+
+  const items = holder.parameter.filter((p) => p && p.key);
+  if (items.length === 0) return null;
+
+  const toCookieString = () => items.map((p) => `${p.key}=${p.value ?? ''}`).join('; ');
+
+  const notice = h(
+    'div',
+    { class: 'cookie-notice' },
+    h(
+      'div',
+      { class: 'cookie-notice-head' },
+      h('span', { class: 'tag warn' }, 'Cookie 参数已移除'),
+      h('span', { class: 'hint' }, `以下 ${items.length} 条历史 Cookie 参数不在界面展示，发送时仍会合并进 Cookie 请求头`)
+    ),
+    h(
+      'div',
+      { class: 'cookie-notice-list' },
+      ...items.map((p) => h('div', { class: 'cookie-notice-item' }, h('code', {}, p.key), h('span', { class: 'mono' }, p.value ?? '')))
+    ),
+    h(
+      'div',
+      { class: 'btn-row' },
+      h(
+        'button',
+        {
+          class: 'small',
+          onclick: async () => {
+            const res = await copyText(toCookieString());
+            if (res.ok) toast('已复制 Cookie 值，粘贴到 Header 的 Cookie 里');
+            else toastCopyFailed(res.error);
+          }
+        },
+        '复制为 Cookie 头'
+      ),
+      h(
+        'button',
+        {
+          class: 'small danger',
+          onclick: () => {
+            if (!confirm(`确定清空这 ${items.length} 条历史 Cookie 参数？清空后需自行在 Header 中维护。`)) return;
+            holder.parameter = [];
+            onChange();
+            // 清空后立即移除提示块：调用方的 onChange 只标脏，不一定重绘
+            notice.remove();
+            toast('历史 Cookie 参数已清空');
+          }
+        },
+        '清空历史 Cookie 参数'
+      )
+    )
+  );
+
+  return notice;
 }
 
 /* ---------------- 页签：Body ---------------- */
@@ -904,14 +972,14 @@ function binaryBodyEditor(body) {
     markDirty();
   };
 
-  const pickBtn = window.apipostShell?.pickFile
+  const pickBtn = window.apimcpShell?.pickFile
     ? h(
         'button',
         {
           class: 'small',
           onclick: async () => {
             try {
-              const picked = await window.apipostShell.pickFile();
+              const picked = await window.apimcpShell.pickFile();
               if (!picked) return;
               bin.file_path = picked.path || '';
               if (!bin.file_name) bin.file_name = picked.name || '';
@@ -967,7 +1035,7 @@ function binaryBodyEditor(body) {
       h(
         'div',
         { class: 'form-hint' },
-        window.apipostShell?.pickFile
+        window.apimcpShell?.pickFile
           ? '路径是运行服务所在机器上的路径，桌面端可直接选文件'
           : '浏览器控制台无法读取本地文件路径，请填写运行服务所在机器上的绝对路径'
       )
@@ -1870,7 +1938,7 @@ function openCurlImport() {
       const first = failures[0];
       toast(`导入 ${created} 个成功，${failures.length} 个失败：${first}`, true);
     } else {
-      notifyShadow('import', '', created);
+      notifyAction('import', '', created);
     }
   }
 
@@ -3374,7 +3442,7 @@ function folderView() {
 
   const panes = {
     basic: basicPane,
-    params: tabParams(d.request, markDirty, { sections: ['query', 'header', 'cookie'] }),
+    params: tabParams(d.request, markDirty, { sections: ['query', 'header'] }),
     body: tabBody(d.request.body = d.request.body || { mode: 'none', parameter: [] }, markDirty, {
       allowedModes: [
         ['none', '不使用'],
@@ -3535,7 +3603,7 @@ function buildPane() {
  * @param {string} name 对象名称
  * @param {number} [count] import 时的数量
  */
-function notifyShadow(action, name, count) {
+function notifyAction(action, name, count) {
   const label = String(name || '');
   let text;
   switch (action) {
@@ -3582,7 +3650,7 @@ async function saveCurrent(onRefresh) {
   rerenderPane();
   const tb = document.querySelector('.editor-toolbar');
   if (tb) tb.replaceWith(editorToolbar(onRefresh));
-  notifyShadow('update', editor.data?.name || editor.selectedId);
+    notifyAction('update', editor.data?.name || editor.selectedId);
   if (onRefresh) onRefresh();
   return true;
 }
@@ -3681,6 +3749,12 @@ function openCreateDialog(type, onRefresh) {
     return;
   }
 
+  // 没有项目时无处落地，直接引导去新建项目
+  if (!editor.projectId) {
+    toast('请先在「总览」页新建项目', true);
+    return;
+  }
+
   const meta = CREATE_META[type];
   if (!meta) return;
 
@@ -3770,7 +3844,7 @@ function openCreateDialog(type, onRefresh) {
       });
       closeModal();
       await focusTarget(created.target_id, onRefresh);
-      notifyShadow('create', name);
+      notifyAction('create', name);
     } catch (err) {
       toast(`创建失败：${err.message}`, true);
     }
@@ -3920,7 +3994,7 @@ function openSaveAs(onRefresh) {
           const tb = document.querySelector('.editor-toolbar');
           if (tb) tb.replaceWith(editorToolbar(onRefresh));
           if (onRefresh) onRefresh();
-          notifyShadow('saveAs', name);
+          notifyAction('saveAs', name);
         } catch (err) {
           toast(`另存为失败：${err.message}`, true);
         }
@@ -3985,6 +4059,8 @@ function editorToolbar(onRefresh) {
   const isFolder = editor.targetType === 'folder';
   const isDoc = editor.targetType === 'doc';
   const isApi = editor.targetType === 'api';
+  // 没有任何项目时，新建接口/目录/文档都无处可落，直接禁用并给出引导
+  const noProject = !editor.projectId;
 
   return h(
     'div',
@@ -3993,6 +4069,8 @@ function editorToolbar(onRefresh) {
       'button',
       {
         class: 'small',
+        disabled: noProject,
+        title: noProject ? '请先在「总览」页新建项目' : '新建接口',
         onclick: () => openCreateDialog('api', onRefresh)
       },
       '+ 新建接口'
@@ -4001,6 +4079,8 @@ function editorToolbar(onRefresh) {
       'button',
       {
         class: 'small',
+        disabled: noProject,
+        title: noProject ? '请先在「总览」页新建项目' : '新建目录',
         onclick: () => openCreateDialog('folder', onRefresh)
       },
       '+ 新建目录'
@@ -4009,6 +4089,8 @@ function editorToolbar(onRefresh) {
       'button',
       {
         class: 'small',
+        disabled: noProject,
+        title: noProject ? '请先在「总览」页新建项目' : '新建文档',
         onclick: () => openCreateDialog('doc', onRefresh)
       },
       '+ 新建文档'
@@ -4054,7 +4136,7 @@ function editorToolbar(onRefresh) {
             editor.data = null;
             discardUnsaved();
             await loadTree(editor.projectId);
-            notifyShadow('delete', removedName);
+            notifyAction('delete', removedName);
             onRefresh();
           } catch (err) {
             toast(err.message, true);
@@ -4107,8 +4189,40 @@ let treeHost = null;
 function rerenderTree() {
   if (!treeHost) return;
   const nodes = renderTreeNodes(editor.tree);
-  if (nodes.length === 0) treeHost.replaceChildren(h('div', { class: 'empty' }, '还没有接口，点上方新建'));
-  else treeHost.replaceChildren(...nodes);
+  if (nodes.length === 0) {
+    // 没有项目时，引导去总览页建项目（否则用户点新建必然失败）
+    if (!editor.projectId) {
+      treeHost.replaceChildren(
+        h(
+          'div',
+          { class: 'empty' },
+          '还没有项目。',
+          h(
+            'div',
+            { class: 'mt12' },
+            h(
+              'button',
+              {
+                class: 'small primary',
+                onclick: () => {
+                  const state = window.__consoleState;
+                  if (state) {
+                    state.view = 'overview';
+                    window.__consoleRender?.();
+                  }
+                }
+              },
+              '去新建项目'
+            )
+          )
+        )
+      );
+      return;
+    }
+    treeHost.replaceChildren(h('div', { class: 'empty' }, '还没有接口，点上方新建'));
+    return;
+  }
+  treeHost.replaceChildren(...nodes);
 }
 
 /* ---------------- 主视图 ---------------- */
@@ -4222,6 +4336,7 @@ window.ApiDesign = {
   /** 共享给「环境与变量」页复用的表单组件 */
   paramTable,
   paramSection,
+  cookieNotice,
   field,
   select,
   input,

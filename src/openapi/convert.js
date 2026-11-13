@@ -167,9 +167,34 @@ function paramsFromParameters(parameters, { resolveRef }) {
   return out;
 }
 
+/**
+ * Cookie 参数不再单列：把 OpenAPI 的 in: cookie 参数合并成一条 Cookie 请求头。
+ * 已有同名 Cookie 头时以现有值为准（避免覆盖用户手写的头）。
+ */
+function headerWithCookies(headerParams, cookieParams) {
+  const headers = Array.isArray(headerParams) ? [...headerParams] : [];
+  const list = (Array.isArray(cookieParams) ? cookieParams : []).filter((p) => p && p.key);
+  if (list.length === 0) return headers;
+  const value = list.map((p) => `${p.key}=${p.value ?? ''}`).join('; ');
+  const existing = headers.find((p) => String(p.key || '').toLowerCase() === 'cookie');
+  if (existing) {
+    existing.value = existing.value ? `${existing.value}; ${value}` : value;
+    return headers;
+  }
+  headers.push({
+    description: '由 OpenAPI cookie 参数合并',
+    field_type: 'String',
+    is_checked: 1,
+    key: 'Cookie',
+    not_null: -1,
+    param_id: `p_${Date.now().toString(16)}${Math.random().toString(16).slice(2, 8)}`,
+    value
+  });
+  return headers;
+}
+
 function bodyFromOperation(operation, { resolveRef }) {
-  const rb = operation.requestBody;
-  if (!rb) return null;
+  const rb = operation.requestBody;  if (!rb) return null;
   let body = rb;
   if (body.$ref) {
     body = resolveRef(body.$ref);
@@ -374,8 +399,8 @@ export function parseOpenApi(input, { basePath = false, hostPath = false } = {})
         request: {
           auth: undefined,
           query: { parameter: grouped.query, query_add_equal: 1 },
-          header: { parameter: grouped.header },
-          cookie: { parameter: grouped.cookie },
+          header: { parameter: headerWithCookies(grouped.header, grouped.cookie) },
+          cookie: { parameter: [] },
           restful: { parameter: grouped.path },
           body: body || { binary: null, mode: 'none', parameter: [], raw: '', raw_parameter: [], raw_schema: { type: 'object' } },
           pre_tasks: [],

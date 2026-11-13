@@ -16,7 +16,7 @@ async function boot({ withFake = true } = {}) {
     data_root: env.root,
     allowed_project_ids: []
   };
-  const instance = createServer({ config, officialRoot: env.root });
+  const instance = createServer({ config, dataRoot: env.root });
   const address = await instance.listen(0);
   const base = `http://127.0.0.1:${address.port}`;
   const headers = { 'X-UI-Token': 'test-ui', 'Content-Type': 'application/json' };
@@ -40,7 +40,7 @@ async function boot({ withFake = true } = {}) {
 
 async function pointEnv(req, env, fake) {
   const { openProject } = await import('../src/store/target.js');
-  const target = openProject({ officialRoot: env.root, projectId: env.projectId });
+  const target = openProject({ dataRoot: env.root, projectId: env.projectId });
   for (const envId of ['1', '2503d4840ac010']) {
     const file = target.readJson(`project/envs/${envId}.json`, null);
     if (!file) continue;
@@ -115,7 +115,7 @@ test('用例：随接口文件持久化（保存后重新读取仍在）', async
     // 直接读工作区文件确认存在 data.cases
     const { openProject } = await import('../src/store/target.js');
     const { readApiFile } = await import('../src/store/apis.js');
-    const target = openProject({ officialRoot: env.root, projectId: env.projectId });
+    const target = openProject({ dataRoot: env.root, projectId: env.projectId });
     const file = readApiFile(target, id);
     assert.ok(Array.isArray(file.data.cases));
     assert.equal(file.data.cases.length, 2);

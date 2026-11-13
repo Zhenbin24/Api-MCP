@@ -9,7 +9,6 @@ import path from 'node:path';
 import { app, BrowserWindow, Menu, dialog, ipcMain, screen, session, shell } from 'electron';
 import { loadConfig, saveConfig, resolveRoots, DEFAULT_PORT } from '../server/config.js';
 import { createServer } from '../server/serve.js';
-import { isOfficialRoot } from '../store/paths.js';
 import { startOrAttach, PortInUseError } from './service-manager.js';
 import { DEFAULT_WINDOW, loadWindowState, saveWindowState } from './window-state.js';
 
@@ -236,11 +235,7 @@ async function boot() {
     config = saveConfig(config);
   }
 
-  const { officialRoot } = resolveRoots(config, { dataRoot: args.dataRoot });
-
-  if (!isOfficialRoot(officialRoot)) {
-    log(`[desktop] 未在 ${officialRoot} 找到 API 单机版数据，可在控制台「总览」里指定。`);
-  }
+  const { dataRoot } = resolveRoots(config, { dataRoot: args.dataRoot });
 
   const port = Number.isFinite(args.port) && args.port > 0 ? args.port : config.port || DEFAULT_PORT;
 
@@ -248,9 +243,9 @@ async function boot() {
   try {
     attached = await startOrAttach({
       config,
-      officialRoot,
+      dataRoot,
       port,
-      createServer: () => createServer({ config, officialRoot, log }),
+      createServer: () => createServer({ config, dataRoot, log }),
       log
     });
   } catch (err) {

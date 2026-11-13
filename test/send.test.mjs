@@ -16,7 +16,7 @@ async function boot() {
     data_root: env.root,
     allowed_project_ids: []
   };
-  const instance = createServer({ config, officialRoot: env.root });
+  const instance = createServer({ config, dataRoot: env.root });
   const address = await instance.listen(0);
   const base = `http://127.0.0.1:${address.port}`;
   const headers = { 'X-UI-Token': 'test-ui', 'Content-Type': 'application/json' };
@@ -62,7 +62,7 @@ async function makeApi(req, env, fake, { name, method, path: apiPath, base = '{{
 async function pointEnvTo(req, env, fake) {
   // 默认环境 id=1（runner 未指定 envId 时会选它），把它的默认服务地址指向 fake server
   const { openProject } = await import('../src/store/target.js');
-  const target = openProject({ officialRoot: env.root, projectId: env.projectId });
+  const target = openProject({ dataRoot: env.root, projectId: env.projectId });
 
   for (const envId of ['1', '2503d4840ac010']) {
     const file = target.readJson(`project/envs/${envId}.json`, null);
@@ -207,7 +207,7 @@ test('send��run ��¼���� body_base64����ֹ��ʷ��
     // �����̼�¼��ȷ��û�� base64
     const { openProject } = await import('../src/store/target.js');
     const { getRun } = await import('../src/store/runs.js');
-    const target = openProject({ officialRoot: env.root, projectId: env.projectId });
+    const target = openProject({ dataRoot: env.root, projectId: env.projectId });
     const run = getRun(target, res.data.run_id);
     assert.ok(run, 'Ӧ�ܶ��� run ��¼');
     const step = run.steps[0];
@@ -230,7 +230,7 @@ test('send��MCP execute_api �����屣�־��򣨲��� base6
     const id = await makeApi(req, env, fake, { name: 'ping', method: 'GET', path: '/users/42' });
 
     const res = await req('POST', `/api/tools/call`, {
-      name: 'apipost_execute_api',
+      name: 'apimcp_execute_api',
       arguments: { project_id: env.projectId, target_id: id }
     });
     assert.equal(res.data.ok, true);
@@ -363,7 +363,7 @@ test('send：落盘 run 仍脱敏且不含 live_detail', async () => {
 
     const { openProject } = await import('../src/store/target.js');
     const { getRun } = await import('../src/store/runs.js');
-    const target = openProject({ officialRoot: env.root, projectId: env.projectId });
+    const target = openProject({ dataRoot: env.root, projectId: env.projectId });
     const run = getRun(target, res.data.run_id);
     assert.ok(run, '应能读到 run');
     assert.equal(run.steps[0].request.headers.Authorization, '***', '落盘记录必须脱敏');
@@ -382,7 +382,7 @@ test('MCP execute_api 不返回 live_detail', async () => {
     const id = await makeApi(req, env, fake, { name: 'ping', method: 'GET', path: '/users/42' });
 
     const res = await req('POST', `/api/tools/call`, {
-      name: 'apipost_execute_api',
+      name: 'apimcp_execute_api',
       arguments: { project_id: env.projectId, target_id: id }
     });
     assert.equal(res.data.ok, true);

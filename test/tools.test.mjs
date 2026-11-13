@@ -7,7 +7,7 @@ import { callTool } from '../src/mcp/tools.js';
 
 async function setup() {
   const env = makeTempRoot();
-  const target = openProject({ officialRoot: env.root, projectId: env.projectId });
+  const target = openProject({ dataRoot: env.root, projectId: env.projectId });
   return { env, target, ctx: await makeContext(env) };
 }
 
@@ -69,7 +69,7 @@ const SPEC = {
 test('OpenAPI 同步：创建接口与目录', async () => {
   const { env, target, ctx } = await setup();
   try {
-    const res = await callTool('apipost_sync_openapi', { project_id: env.projectId, openapi: SPEC }, ctx);
+    const res = await callTool('apimcp_sync_openapi', { project_id: env.projectId, openapi: SPEC }, ctx);
     assert.equal(res.summary.created, 4);
     assert.equal(res.summary.updated, 0);
 
@@ -103,14 +103,14 @@ test('OpenAPI 同步：创建接口与目录', async () => {
 test('OpenAPI 同步：url_and_folder 覆盖、ignore 跳过', async () => {
   const { env, target, ctx } = await setup();
   try {
-    await callTool('apipost_sync_openapi', { project_id: env.projectId, openapi: SPEC }, ctx);
+    await callTool('apimcp_sync_openapi', { project_id: env.projectId, openapi: SPEC }, ctx);
 
-    const first = await callTool('apipost_sync_openapi', { project_id: env.projectId, openapi: SPEC }, ctx);
+    const first = await callTool('apimcp_sync_openapi', { project_id: env.projectId, openapi: SPEC }, ctx);
     assert.equal(first.summary.created, 0);
     assert.equal(first.summary.updated, 4);
 
     const ignore = await callTool(
-      'apipost_sync_openapi',
+      'apimcp_sync_openapi',
       { project_id: env.projectId, openapi: SPEC, api_cover_mode: 'ignore' },
       ctx
     );
@@ -124,9 +124,9 @@ test('OpenAPI 同步：url_and_folder 覆盖、ignore 跳过', async () => {
 test('OpenAPI 同步：both 保留重复', async () => {
   const { env, target, ctx } = await setup();
   try {
-    await callTool('apipost_sync_openapi', { project_id: env.projectId, openapi: SPEC }, ctx);
+    await callTool('apimcp_sync_openapi', { project_id: env.projectId, openapi: SPEC }, ctx);
     const both = await callTool(
-      'apipost_sync_openapi',
+      'apimcp_sync_openapi',
       { project_id: env.projectId, openapi: SPEC, api_cover_mode: 'both' },
       ctx
     );
@@ -144,7 +144,7 @@ test('OpenAPI 同步：folder_id 导入到指定目录 + api_scripts', async () 
     const folder = createApiOrFolder(target, { name: '手工目录', targetType: TARGET_TYPE.FOLDER });
 
     const res = await callTool(
-      'apipost_sync_openapi',
+      'apimcp_sync_openapi',
       {
         project_id: env.projectId,
         openapi: SPEC,
@@ -177,12 +177,12 @@ test('OpenAPI 同步：folder_id 导入到指定目录 + api_scripts', async () 
 test('OpenAPI 同步：clear 清空目录后导入', async () => {
   const { env, target, ctx } = await setup();
   try {
-    await callTool('apipost_sync_openapi', { project_id: env.projectId, openapi: SPEC }, ctx);
+    await callTool('apimcp_sync_openapi', { project_id: env.projectId, openapi: SPEC }, ctx);
     const before = listApis(target, {});
     assert.equal(before.length, 5);
 
     const cleared = await callTool(
-      'apipost_sync_openapi',
+      'apimcp_sync_openapi',
       { project_id: env.projectId, openapi: SPEC, api_cover_mode: 'clear' },
       ctx
     );
@@ -197,7 +197,7 @@ test('OpenAPI 同步：folder_id 不存在时报错', async () => {
   const { env, ctx } = await setup();
   try {
     await assert.rejects(
-      () => callTool('apipost_sync_openapi', { project_id: env.projectId, openapi: SPEC, folder_id: 'deadbeef000001' }, ctx),
+      () => callTool('apimcp_sync_openapi', { project_id: env.projectId, openapi: SPEC, folder_id: 'deadbeef000001' }, ctx),
       /未找到指定的导入目录/
     );
   } finally {
@@ -209,7 +209,7 @@ test('OpenAPI 同步：非法版本报错', async () => {
   const { env, ctx } = await setup();
   try {
     await assert.rejects(
-      () => callTool('apipost_sync_openapi', { project_id: env.projectId, openapi: { swagger: '2.0', paths: {} } }, ctx),
+      () => callTool('apimcp_sync_openapi', { project_id: env.projectId, openapi: { swagger: '2.0', paths: {} } }, ctx),
       /仅支持 OpenAPI 3.0 或 3.1/
     );
   } finally {
@@ -220,12 +220,12 @@ test('OpenAPI 同步：非法版本报错', async () => {
 test('环境工具：列表 / 切换 / 增删改 / 服务', async () => {
   const { env, target, ctx } = await setup();
   try {
-    const list = await callTool('apipost_list_environments', { project_id: env.projectId }, ctx);
+    const list = await callTool('apimcp_list_environments', { project_id: env.projectId }, ctx);
     assert.equal(list.environments.length, 2);
     assert.equal(list.current_env_id, '1');
 
     const created = await callTool(
-      'apipost_create_environment',
+      'apimcp_create_environment',
       { project_id: env.projectId, name: '生产', base_url: 'https://prod.example.com' },
       ctx
     );
@@ -233,33 +233,33 @@ test('环境工具：列表 / 切换 / 增删改 / 服务', async () => {
     assert.equal(created.environment.base_url, 'https://prod.example.com');
 
     const updated = await callTool(
-      'apipost_update_environment',
+      'apimcp_update_environment',
       { project_id: env.projectId, environment_id: created.env_id, name: '生产环境' },
       ctx
     );
     assert.equal(updated.environment.name, '生产环境');
 
     const server = await callTool(
-      'apipost_create_environment_server',
+      'apimcp_create_environment_server',
       { project_id: env.projectId, name: '支付服务', environment_id: created.env_id, base_url: 'https://pay.example.com' },
       ctx
     );
     assert.ok(server.server.server_id);
 
     const servers = await callTool(
-      'apipost_list_environment_servers',
+      'apimcp_list_environment_servers',
       { project_id: env.projectId, environment_id: created.env_id },
       ctx
     );
     assert.ok(servers.servers.some((s) => s.name === '支付服务' && s.base_url === 'https://pay.example.com'));
 
     await assert.rejects(
-      () => callTool('apipost_delete_environment', { project_id: env.projectId, environment_id: created.env_id, confirm: false }, ctx),
+      () => callTool('apimcp_delete_environment', { project_id: env.projectId, environment_id: created.env_id, confirm: false }, ctx),
       /confirm: true/
     );
 
     const del = await callTool(
-      'apipost_delete_environment',
+      'apimcp_delete_environment',
       { project_id: env.projectId, environment_id: created.env_id, confirm: true },
       ctx
     );
@@ -267,7 +267,7 @@ test('环境工具：列表 / 切换 / 增删改 / 服务', async () => {
 
     // 默认环境不可删
     await assert.rejects(
-      () => callTool('apipost_delete_environment', { project_id: env.projectId, environment_id: '1', confirm: true }, ctx),
+      () => callTool('apimcp_delete_environment', { project_id: env.projectId, environment_id: '1', confirm: true }, ctx),
       /默认环境不可删除/
     );
   } finally {
@@ -279,30 +279,30 @@ test('变量工具：upsert / get / delete（环境与全局）', async () => {
   const { env, ctx } = await setup();
   try {
     const up = await callTool(
-      'apipost_upsert_environment_variable',
+      'apimcp_upsert_environment_variable',
       { project_id: env.projectId, environment_id: '1', key: 'API_KEY', value: 'default', current_value: 'runtime' },
       ctx
     );
     assert.equal(up.variable.value, 'default');
     assert.equal(up.variable.current_value, 'runtime');
 
-    const got = await callTool('apipost_get_environment_variables', { project_id: env.projectId, environment_id: '1' }, ctx);
+    const got = await callTool('apimcp_get_environment_variables', { project_id: env.projectId, environment_id: '1' }, ctx);
     const found = got.variables.find((v) => v.key === 'API_KEY');
     assert.equal(found.current_value, 'runtime');
 
     await callTool(
-      'apipost_upsert_global_variable',
+      'apimcp_upsert_global_variable',
       { project_id: env.projectId, key: 'TENANT', value: 'acme' },
       ctx
     );
-    const globals = await callTool('apipost_get_global_variables', { project_id: env.projectId }, ctx);
+    const globals = await callTool('apimcp_get_global_variables', { project_id: env.projectId }, ctx);
     assert.ok(globals.variables.some((v) => v.key === 'TENANT' && v.value === 'acme'));
 
     await assert.rejects(
-      () => callTool('apipost_delete_global_variable', { project_id: env.projectId, key: 'TENANT', confirm: false }, ctx),
+      () => callTool('apimcp_delete_global_variable', { project_id: env.projectId, key: 'TENANT', confirm: false }, ctx),
       /confirm: true/
     );
-    const del = await callTool('apipost_delete_global_variable', { project_id: env.projectId, key: 'TENANT', confirm: true }, ctx);
+    const del = await callTool('apimcp_delete_global_variable', { project_id: env.projectId, key: 'TENANT', confirm: true }, ctx);
     assert.equal(del.deleted, true);
   } finally {
     cleanup(env.base);
@@ -315,7 +315,7 @@ test('执行计划工具：create / list / get / update / delete', async () => {
     const api = createApiOrFolder(target, { name: 'ping', method: 'GET', url: 'https://api.test/ping' });
 
     const created = await callTool(
-      'apipost_create_execution_flow',
+      'apimcp_create_execution_flow',
       {
         project_id: env.projectId,
         name: '流程A',
@@ -326,15 +326,15 @@ test('执行计划工具：create / list / get / update / delete', async () => {
     );
     assert.equal(created.step_count, 1);
 
-    const list = await callTool('apipost_list_execution_flows', { project_id: env.projectId }, ctx);
+    const list = await callTool('apimcp_list_execution_flows', { project_id: env.projectId }, ctx);
     assert.equal(list.flows.length, 1);
 
-    const detail = await callTool('apipost_get_execution_flow', { project_id: env.projectId, flow_id: created.flow_id }, ctx);
+    const detail = await callTool('apimcp_get_execution_flow', { project_id: env.projectId, flow_id: created.flow_id }, ctx);
     assert.equal(detail.flow.name, '流程A');
     const stepId = detail.flow.steps[0].step_id;
 
     const updated = await callTool(
-      'apipost_update_execution_flow',
+      'apimcp_update_execution_flow',
       {
         project_id: env.projectId,
         flow_id: created.flow_id,
@@ -345,22 +345,22 @@ test('执行计划工具：create / list / get / update / delete', async () => {
     );
     assert.equal(updated.name, '流程B');
 
-    const after = await callTool('apipost_get_execution_flow', { project_id: env.projectId, flow_id: created.flow_id }, ctx);
+    const after = await callTool('apimcp_get_execution_flow', { project_id: env.projectId, flow_id: created.flow_id }, ctx);
     assert.equal(after.flow.steps.length, 1);
     assert.equal(after.flow.steps[0].step_id, stepId, 'step_id 应沿用');
     assert.equal(after.flow.steps[0].post_script, 'console.log(2)');
 
     await assert.rejects(
-      () => callTool('apipost_delete_execution_flow', { project_id: env.projectId, flow_id: created.flow_id, confirm: false }, ctx),
+      () => callTool('apimcp_delete_execution_flow', { project_id: env.projectId, flow_id: created.flow_id, confirm: false }, ctx),
       /confirm: true/
     );
     const del = await callTool(
-      'apipost_delete_execution_flow',
+      'apimcp_delete_execution_flow',
       { project_id: env.projectId, flow_id: created.flow_id, confirm: true },
       ctx
     );
     assert.equal(del.deleted, true);
-    assert.equal((await callTool('apipost_list_execution_flows', { project_id: env.projectId }, ctx)).flows.length, 0);
+    assert.equal((await callTool('apimcp_list_execution_flows', { project_id: env.projectId }, ctx)).flows.length, 0);
   } finally {
     cleanup(env.base);
   }
@@ -373,7 +373,7 @@ test('执行计划工具：非 HTTP 接口被拒绝', async () => {
     await assert.rejects(
       () =>
         callTool(
-          'apipost_create_execution_flow',
+          'apimcp_create_execution_flow',
           { project_id: env.projectId, name: 'x', steps: [{ target_id: folder.target_id }] },
           ctx
         ),
@@ -401,13 +401,13 @@ test('API 工具：get_api_detail 返回脚本标记、delete 级联', async () 
     const { writeApiFile, findApiItem } = await import('../src/store/apis.js');
     writeApiFile(target, api.target_id, data, findApiItem(target, api.target_id));
 
-    const detail = await callTool('apipost_get_api_detail', { project_id: env.projectId, target_id: api.target_id }, ctx);
+    const detail = await callTool('apimcp_get_api_detail', { project_id: env.projectId, target_id: api.target_id }, ctx);
     assert.equal(detail.builtin_pre_scripts.length, 1);
     assert.match(detail.builtin_pre_scripts[0], /pre/);
     assert.equal(detail.builtin_post_scripts.length, 1);
 
     const del = await callTool(
-      'apipost_delete_apis',
+      'apimcp_delete_apis',
       { project_id: env.projectId, target_ids: [folder.target_id], confirm: true },
       ctx
     );

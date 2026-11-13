@@ -87,7 +87,7 @@ function urlToPattern(rawUrl) {
 /** 找到匹配请求的 mock 接口 */
 function matchMock(ctx, method, pathname) {
   for (const project of ctx.projects()) {
-    const target = openProject({ officialRoot: ctx.officialRoot, projectId: project.project_id });
+    const target = openProject({ dataRoot: ctx.dataRoot, projectId: project.project_id });
     let index;
     try {
       index = readApiIndex(target);
@@ -112,7 +112,7 @@ function matchMock(ctx, method, pathname) {
 export function listMocks(ctx) {
   const out = [];
   for (const project of ctx.projects()) {
-    const target = openProject({ officialRoot: ctx.officialRoot, projectId: project.project_id });
+    const target = openProject({ dataRoot: ctx.dataRoot, projectId: project.project_id });
     let index;
     try {
       index = readApiIndex(target);
@@ -148,10 +148,10 @@ function mockPathOf(rawUrl) {
 
 /* ---------------- 服务 ---------------- */
 
-export function createMockServer({ officialRoot, config, log = () => {} }) {
+export function createMockServer({ dataRoot, config, log = () => {} }) {
   const ctx = {
-    officialRoot,
-    projects: () => listProjects(officialRoot)
+    dataRoot,
+    projects: () => listProjects(dataRoot)
   };
 
   const startedAt = Date.now();

@@ -17,7 +17,7 @@ async function boot() {
     data_root: env.root,
     allowed_project_ids: []
   };
-  const instance = createServer({ config, officialRoot: env.root });
+  const instance = createServer({ config, dataRoot: env.root });
   const address = await instance.listen(0);
   const base = `http://127.0.0.1:${address.port}`;
   const headers = { 'X-UI-Token': 'test-ui', 'Content-Type': 'application/json' };

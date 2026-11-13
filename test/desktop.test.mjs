@@ -38,9 +38,9 @@ test('service-manager：端口空闲时以 owned 模式启动并能关闭', asyn
   try {
     service = await startOrAttach({
       config,
-      officialRoot: env.root,
+      dataRoot: env.root,
       port: 0,
-      createServer: () => createServer({ config, officialRoot: env.root })
+      createServer: () => createServer({ config, dataRoot: env.root })
     });
 
     assert.equal(service.mode, 'owned');
@@ -67,7 +67,7 @@ test('service-manager：端口空闲时以 owned 模式启动并能关闭', asyn
 test('service-manager：端口已被同款服务占用时附着，不关闭对方服务', async () => {
   const env = makeTempRoot();
   const ownerConfig = bootConfig(env);
-  const owner = createServer({ config: ownerConfig, officialRoot: env.root });
+  const owner = createServer({ config: ownerConfig, dataRoot: env.root });
   const address = await owner.listen(0);
   const port = address.port;
 
@@ -77,9 +77,9 @@ test('service-manager：端口已被同款服务占用时附着，不关闭对�
   try {
     service = await startOrAttach({
       config,
-      officialRoot: env.root,
+      dataRoot: env.root,
       port,
-      createServer: () => createServer({ config, officialRoot: env.root })
+      createServer: () => createServer({ config, dataRoot: env.root })
     });
 
     assert.equal(service.mode, 'attached');
@@ -112,9 +112,9 @@ test('service-manager：端口被别的程序占用时抛 PortInUseError', async
   try {
     const err = await startOrAttach({
       config,
-      officialRoot: env.root,
+      dataRoot: env.root,
       port: occupied.port,
-      createServer: () => createServer({ config, officialRoot: env.root })
+      createServer: () => createServer({ config, dataRoot: env.root })
     }).then(
       () => null,
       (e) => e
@@ -160,6 +160,50 @@ test('probeService：能区分本服务、异类服务与空端口', async () =>
   } finally {
     await ours.close();
     await other.close();
+  }
+});
+
+test('probeService：data_root 不一致时不附着', async () => {
+  const env = makeTempRoot();
+  const config = bootConfig(env);
+  const owner = createServer({ config, dataRoot: env.root });
+  const address = await owner.listen(0);
+  const port = address.port;
+
+  try {
+    // 同源：正常附着
+    assert.equal(
+      await probeService({ port, uiToken: 'test-ui-token', expectedDataRoot: env.root }),
+      true,
+      '数据目录一致时应允许附着'
+    );
+
+    // 异源：拒绝附着，避免桌面端连到读写另一份数据的服务
+    const otherRoot = `${env.root}-other`;
+    assert.equal(
+      await probeService({ port, uiToken: 'test-ui-token', expectedDataRoot: otherRoot }),
+      false,
+      '数据目录不一致时必须拒绝附着'
+    );
+
+    // 不传 expectedDataRoot 时保持旧行为（只校验 token）
+    assert.equal(await probeService({ port, uiToken: 'test-ui-token' }), true);
+
+    // startOrAttach 在异源时抛 PortInUseError
+    const localConfig = bootConfig(env);
+    const err = await startOrAttach({
+      config: localConfig,
+      dataRoot: otherRoot,
+      port,
+      createServer: () => createServer({ config: localConfig, dataRoot: otherRoot })
+    }).then(
+      () => null,
+      (e) => e
+    );
+    assert.ok(err instanceof PortInUseError, `期望 PortInUseError，实际 ${err && err.name}`);
+  } finally {
+    await owner.close();
+    cleanup(env.base);
   }
 });
 

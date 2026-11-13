@@ -1,5 +1,14 @@
-import { readJson, writeJsonAtomic, ensureDir } from '../util/fsx.js';
-import { configPath, ownRoot, detectOfficialRoot, defaultOfficialRoot, migrateLegacyOwnRoot } from '../store/paths.js';
+import { readJson, writeJsonAtomic, ensureDir, exists } from '../util/fsx.js';
+import {
+  configPath,
+  ownRoot,
+  resolveDataRoot,
+  ensureDataRoot,
+  defaultDataRoot,
+  migrateLegacyOwnRoot,
+  projectsIndexPath
+} from '../store/paths.js';
+import { ensureDefaultProject } from '../store/projects.js';
 import { token as makeToken } from '../util/ids.js';
 
 export const DEFAULT_PORT = 39100;
@@ -51,10 +60,23 @@ export function saveConfig(config) {
   return next;
 }
 
+/**
+ * 解析并初始化数据根：显式参数 > 环境变量 > 配置文件 > 默认目录。
+ *
+ * 首次启动会自动建出骨架（offline-projects.json / offline-data / offline-data-local），
+ * 并播种一个默认项目，因此不再依赖本机是否装过 Apipost 单机版，也不会一进来就是空列表。
+ *
+ * @returns {{dataRoot: string, created: boolean}}
+ */
 export function resolveRoots(config, { dataRoot } = {}) {
-  // 显式参数 > 环境变量 > 配置文件 > 默认探测
-  const officialRoot = detectOfficialRoot({ explicit: dataRoot, config });
-  return { officialRoot };
+  const resolved = resolveDataRoot({ explicit: dataRoot, config });
+  // 首次初始化：项目索引还不存在。比「目录是否存在」更准——
+  // 目录可能被手动建过，或上次异常退出只建出目录却没建索引。
+  const firstInit = !exists(projectsIndexPath(resolved));
+  const root = ensureDataRoot(resolved);
+  // 必须在 ensureDataRoot 之后：createProject 依赖 meta.json 里的 default_team_id
+  if (firstInit) ensureDefaultProject(root);
+  return { dataRoot: root, created: firstInit };
 }
 
 export function publicConfig(config) {
@@ -64,7 +86,7 @@ export function publicConfig(config) {
     has_token: Boolean(token),
     has_ui_token: Boolean(ui_token),
     config_path: configPath(),
-    default_data_root: defaultOfficialRoot()
+    default_data_root: defaultDataRoot()
   };
 }
 

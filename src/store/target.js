@@ -21,14 +21,14 @@ const AREA_PROJECT = 'project';
 const AREA_LOCAL = 'local';
 
 export class ProjectTarget {
-  constructor({ officialRoot, projectId }) {
-    if (!officialRoot) throw new Error('缺少 officialRoot');
+  constructor({ dataRoot, projectId }) {
+    if (!dataRoot) throw new Error('缺少 dataRoot');
     if (!projectId) throw new Error('缺少 project_id');
-    this.officialRoot = officialRoot;
+    this.dataRoot = dataRoot;
     this.projectId = projectId;
     this.roots = {
-      [AREA_PROJECT]: projectDir(officialRoot, projectId),
-      [AREA_LOCAL]: localProjectDir(officialRoot, projectId)
+      [AREA_PROJECT]: projectDir(dataRoot, projectId),
+      [AREA_LOCAL]: localProjectDir(dataRoot, projectId)
     };
   }
 
@@ -113,8 +113,8 @@ export class ProjectTarget {
   }
 }
 
-export function openProject({ officialRoot, projectId }) {
-  return new ProjectTarget({ officialRoot, projectId });
+export function openProject({ dataRoot, projectId }) {
+  return new ProjectTarget({ dataRoot, projectId });
 }
 
 export { AREA_PROJECT, AREA_LOCAL };

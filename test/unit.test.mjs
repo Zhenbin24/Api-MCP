@@ -158,6 +158,35 @@ test('OpenAPI：解析 3.0 接口与参数', () => {
   assert.equal(post.request.body.raw_schema.properties.name.type, 'string');
 });
 
+test('OpenAPI：cookie 参数合并成 Cookie 头', () => {
+  const spec = {
+    openapi: '3.0.3',
+    info: { title: 't', version: '1' },
+    servers: [{ url: 'https://api.example.com' }],
+    paths: {
+      '/s': {
+        get: {
+          summary: '带 cookie',
+          parameters: [
+            { name: 'sid', in: 'cookie', schema: { type: 'string' }, example: 'abc' },
+            { name: 'theme', in: 'cookie', schema: { type: 'string' }, example: 'dark' },
+            { name: 'X-Trace', in: 'header', schema: { type: 'string' }, example: 't1' }
+          ],
+          responses: { 200: { description: 'ok' } }
+        }
+      }
+    }
+  };
+
+  const parsed = parseOpenApi(spec);
+  const item = parsed.items[0];
+  const cookieHeader = item.request.header.parameter.find((h) => String(h.key).toLowerCase() === 'cookie');
+  assert.ok(cookieHeader, '应生成 Cookie 头');
+  assert.equal(cookieHeader.value, 'sid=abc; theme=dark');
+  assert.deepEqual(item.request.cookie.parameter, [], 'cookie 参数表不再有内容');
+  assert.ok(item.request.header.parameter.some((h) => h.key === 'X-Trace'), '普通 header 保留');
+});
+
 test('OpenAPI：base_path 拼 server url', () => {
   const spec = {
     openapi: '3.1.0',

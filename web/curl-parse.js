@@ -741,9 +741,18 @@ export function applyParsedToApiData(data, parsed) {
   req.query.parameter = (parsed.query || []).map((q) => makeParam(q.key, q.value));
   req.query.query_add_equal = 1;
 
-  // cookies
+  // cookies：Cookie 参数表已从界面移除，统一写进 Header 的 Cookie 键
+  const cookieValue = (parsed.cookies || [])
+    .filter((c) => c && c.key)
+    .map((c) => `${c.key}=${c.value ?? ''}`)
+    .join('; ');
+  if (cookieValue) {
+    const existing = req.header.parameter.find((p) => String(p.key || '').toLowerCase() === 'cookie');
+    if (existing) existing.value = cookieValue;
+    else req.header.parameter.push(makeParam('Cookie', cookieValue));
+  }
   req.cookie = req.cookie || { parameter: [] };
-  req.cookie.parameter = (parsed.cookies || []).map((c) => makeParam(c.key, c.value));
+  req.cookie.parameter = [];
 
   // path 参数
   req.restful = req.restful || { parameter: [] };

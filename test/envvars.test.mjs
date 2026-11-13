@@ -16,7 +16,7 @@ async function boot() {
     data_root: env.root,
     allowed_project_ids: []
   };
-  const instance = createServer({ config, officialRoot: env.root });
+  const instance = createServer({ config, dataRoot: env.root });
   const address = await instance.listen(0);
   const base = `http://127.0.0.1:${address.port}`;
   const headers = { 'X-UI-Token': 'test-ui', 'Content-Type': 'application/json' };
@@ -289,11 +289,11 @@ test('环境切换：MCP 工具后 list_environments 的 current_env_id 跟随',
       return res.data.result;
     };
 
-    await call('apipost_switch_environment', {
+    await call('apimcp_switch_environment', {
       project_id: env.projectId,
       environment_id: '2503d4840ac010'
     });
-    const listed = await call('apipost_list_environments', { project_id: env.projectId });
+    const listed = await call('apimcp_list_environments', { project_id: env.projectId });
     assert.equal(listed.current_env_id, '2503d4840ac010');
 
     // 持久化：控制台读到同一个当前环境
@@ -313,10 +313,10 @@ test('全局参数 MCP 工具：get / update', async () => {
       return res.data.result;
     };
 
-    const got = await call('apipost_get_global_params', { project_id: env.projectId });
+    const got = await call('apimcp_get_global_params', { project_id: env.projectId });
     assert.equal(got.params.auth.type, 'noauth');
 
-    const updated = await call('apipost_update_global_params', {
+    const updated = await call('apimcp_update_global_params', {
       project_id: env.projectId,
       header: [{ key: 'X-From-AI', value: 'yes' }],
       pre_tasks: [{ type: 'customScript', data: 'console.log("hi")', enabled: 1 }]
@@ -327,7 +327,7 @@ test('全局参数 MCP 工具：get / update', async () => {
 
     // 空 patch 报错
     const res = await req('POST', '/api/tools/call', {
-      name: 'apipost_update_global_params',
+      name: 'apimcp_update_global_params',
       arguments: { project_id: env.projectId }
     });
     assert.equal(res.data.ok, false);

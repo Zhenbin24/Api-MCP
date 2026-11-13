@@ -1,9 +1,9 @@
 {
   "name": "apimcp",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "API版 MCP 服务 (Windows) — 直连 Apipost 单机版，官方 30 工具兼容",
+  "description": "API MCP 服务 (Windows) — 本地接口设计与调试，内置 MCP 服务与可视化控制台",
   "bin": {
     "apimcp": "./src/main.js"
   },

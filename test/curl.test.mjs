@@ -224,6 +224,36 @@ test('curl: Cookie header 拆到 cookie 表', () => {
   assert.ok(!res.headers.some((h) => h.key.toLowerCase() === 'cookie'));
 });
 
+test('curl: applyParsedToApiData 把 cookie 写成 Cookie 头', () => {
+  const res = parseCurl(`curl -b "a=1; b=2" https://api.test/x`);
+  const data = { request: { header: {}, query: {}, cookie: {}, restful: {}, body: {}, auth: { type: 'inherit' } } };
+  applyParsedToApiData(data, res);
+
+  const cookieHeader = data.request.header.parameter.find((h) => String(h.key).toLowerCase() === 'cookie');
+  assert.ok(cookieHeader, '应生成 Cookie 请求头');
+  assert.equal(cookieHeader.value, 'a=1; b=2');
+  assert.deepEqual(data.request.cookie.parameter, [], '不再写入 cookie 参数表');
+});
+
+test('curl: applyParsedToApiData 复用已有的 Cookie 头', () => {
+  const res = parseCurl(`curl -b "a=1" https://api.test/x`);
+  const data = {
+    request: {
+      header: { parameter: [{ key: 'cookie', value: 'old=0' }] },
+      query: {},
+      cookie: {},
+      restful: {},
+      body: {},
+      auth: { type: 'inherit' }
+    }
+  };
+  applyParsedToApiData(data, res);
+
+  const cookies = data.request.header.parameter.filter((h) => String(h.key).toLowerCase() === 'cookie');
+  assert.equal(cookies.length, 1, '不应产生重复 Cookie 头');
+  assert.equal(cookies[0].value, 'a=1');
+});
+
 test('curl: URL 中的 {id} 提取为 restful 参数', () => {
   const res = parseCurl(`curl https://api.test/users/{id}/orders/{orderId}`);
   assert.deepEqual(res.restful.map((r) => r.key), ['id', 'orderId']);

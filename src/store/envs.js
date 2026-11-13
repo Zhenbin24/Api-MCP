@@ -41,7 +41,7 @@ export function assertEnv(target, envId) {
   if (!envId) throw new Error('缺少 environment_id');
   const env = readEnv(target, envId);
   if (!env) {
-    throw new Error(`环境不存在：${envId}，请先用 apipost_list_environments 查询可选环境`);
+    throw new Error(`环境不存在：${envId}，请先用 apimcp_list_environments 查询可选环境`);
   }
   return env;
 }
@@ -265,7 +265,7 @@ export function writeCurrentEnvId(target, envId) {
  */
 export function resolveCurrentEnv(target, { envId, preferredEnvId } = {}) {
   const envs = listEnvironments(target);
-  if (envs.length === 0) throw new Error('项目还没有任何环境，请先用 apipost_create_environment 创建');
+  if (envs.length === 0) throw new Error('项目还没有任何环境，请先用 apimcp_create_environment 创建');
   if (envId) return assertEnv(target, envId);
   const remembered = readCurrentEnvId(target);
   const pick =
@@ -286,13 +286,15 @@ export function replaceEnvVariables(target, envId, list = []) {
     const key = String(item?.key ?? '').trim();
     if (!key) continue;
     const value = item.value ?? '';
-    const currentValue = item.current_value === undefined || item.current_value === '' ? value : item.current_value;
+    // 空串的「当前值」等同未填：回落到默认值
+    const currentValue = firstFilledValue(item.current_value, value);
     defaults[key] = {
       value,
       current_value: currentValue,
       description: String(item.description || '')
     };
-    envRuntime[key] = { value: currentValue };
+    // 与 upsert 一致：空当前值不落盘，读取时回落到默认值
+    if (!isBlankRuntimeValue(currentValue)) envRuntime[key] = { value: currentValue };
   }
   env.env_var_list = defaults;
   env.updated_at = target.now();
@@ -302,9 +304,62 @@ export function replaceEnvVariables(target, envId, list = []) {
   return getEnvironmentVariables(target, envId);
 }
 
-/** 运行时变量历史（current_value），存在 local 区 */
+/** 运行时变量历史（current_value），存在 local 区。写入时只存真正的覆盖，读取时丢弃空值。 */
+function isBlankRuntimeValue(item) {
+  const value = item && typeof item === 'object' ? item.value : item;
+  return value === undefined || value === null || String(value) === '';
+}
+
+function dropBlankRuntime(record) {
+  if (!record || typeof record !== 'object') return {};
+  const out = {};
+  for (const [key, item] of Object.entries(record)) {
+    if (isBlankRuntimeValue(item)) continue;
+    out[key] = item;
+  }
+  return out;
+}
+
+/** 取第一个非空候选值（'' / undefined / null 都跳过），都没有则返回 '' */
+function firstFilledValue(...candidates) {
+  for (const value of candidates) {
+    if (value === undefined || value === null) continue;
+    if (String(value) === '') continue;
+    return value;
+  }
+  return '';
+}
+
+/**
+ * 解析「当前值」该取什么。
+ *
+ * 关键点：空串的 current_value 等同「未填」，必须回落到默认值，
+ * 否则空串会压掉默认值（{{token}} 渲染成空，接口 401）。
+ *
+ * 前端是「GET 后整表 POST 回来」，回传的 current_value 是回落后的生效值，
+ * 靠「等于旧默认值」这一特征识别出「用户没动当前值」，改默认值时跟着新默认值走。
+ */
+function resolveCurrentValue({ value, prevValue, currentValue, runtimeValue }) {
+  const nextValue = value === undefined ? (prevValue ?? '') : value;
+  const prevDefault = String(prevValue ?? '');
+  const incomingBlank = currentValue === undefined || currentValue === null || String(currentValue) === '';
+  // 已落盘的运行时值是否构成覆盖
+  const hadOverride = runtimeValue !== undefined && runtimeValue !== null && String(runtimeValue) !== prevDefault;
+
+  if (incomingBlank) {
+    return hadOverride ? runtimeValue : nextValue;
+  }
+  const incoming = String(currentValue);
+  if (incoming === String(nextValue)) return nextValue; // 等于新默认值：不算覆盖
+  if (incoming === prevDefault) return nextValue; // 旧默认值的回传：跟着新默认值走
+  return currentValue; // 真正的覆盖
+}
+
 export function readEnvVarsHistory(target) {
-  return target.readJson(target.l('env_vars_history.json'), {}) || {};
+  const raw = target.readJson(target.l('env_vars_history.json'), {}) || {};
+  const out = {};
+  for (const [envId, record] of Object.entries(raw)) out[envId] = dropBlankRuntime(record);
+  return out;
 }
 
 export function writeEnvVarsHistory(target, data) {
@@ -313,7 +368,7 @@ export function writeEnvVarsHistory(target, data) {
 }
 
 export function readGlobalVarsHistory(target) {
-  return target.readJson(target.l('global_vars_history.json'), {}) || {};
+  return dropBlankRuntime(target.readJson(target.l('global_vars_history.json'), {}) || {});
 }
 
 export function writeGlobalVarsHistory(target, data) {
@@ -341,7 +396,8 @@ export function mergeVariables(defaults = {}, runtime = {}) {
       return {
         key,
         value: def.value ?? '',
-        current_value: run.value ?? def.current_value ?? def.value ?? '',
+        // 运行时值为空时显示默认值（与执行时的取值一致），避免「当前值」列看着像空
+        current_value: firstFilledValue(run.value, def.current_value, def.value),
         description: def.description ?? ''
       };
     });
@@ -359,14 +415,12 @@ export function upsertEnvVariable(target, { envId, key, value, currentValue, des
 
   const nextValue = value === undefined ? (prev.value ?? '') : value;
   const runtimeValue = envRuntime[trimmed]?.value;
-  // 显式改了默认值时，运行时值一并对齐，避免旧的 current_value 一直盖住新值
-  const valueChanged = value !== undefined && String(nextValue) !== String(prev.value ?? '');
-  const nextCurrent =
-    currentValue !== undefined
-      ? currentValue
-      : valueChanged
-        ? nextValue
-        : (runtimeValue ?? prev.current_value ?? nextValue ?? '');
+  const nextCurrent = resolveCurrentValue({
+    value,
+    prevValue: prev.value,
+    currentValue,
+    runtimeValue
+  });
 
   defaults[trimmed] = {
     ...prev,
@@ -374,7 +428,9 @@ export function upsertEnvVariable(target, { envId, key, value, currentValue, des
     current_value: nextCurrent,
     description: description === undefined ? (prev.description ?? '') : String(description || '')
   };
-  envRuntime[trimmed] = { value: nextCurrent };
+  // 运行时值只存「真正的覆盖」：空值不落盘，读取时自然回落到默认值
+  if (isBlankRuntimeValue(nextCurrent)) delete envRuntime[trimmed];
+  else envRuntime[trimmed] = { value: nextCurrent };
 
   env.env_var_list = defaults;
   env.updated_at = target.now();
@@ -434,14 +490,12 @@ export function upsertGlobalVariable(target, { key, value, currentValue, descrip
   const prev = defaults[trimmed] || {};
   const nextValue = value === undefined ? (prev.value ?? '') : value;
   const runtimeValue = runtime[trimmed]?.value;
-  // 显式改了默认值时，运行时值一并对齐，避免旧的 current_value 一直盖住新值
-  const valueChanged = value !== undefined && String(nextValue) !== String(prev.value ?? '');
-  const nextCurrent =
-    currentValue !== undefined
-      ? currentValue
-      : valueChanged
-        ? nextValue
-        : (runtimeValue ?? prev.current_value ?? nextValue ?? '');
+  const nextCurrent = resolveCurrentValue({
+    value,
+    prevValue: prev.value,
+    currentValue,
+    runtimeValue
+  });
 
   defaults[trimmed] = {
     ...prev,
@@ -449,7 +503,9 @@ export function upsertGlobalVariable(target, { key, value, currentValue, descrip
     current_value: nextCurrent,
     description: description === undefined ? (prev.description ?? '') : String(description || '')
   };
-  runtime[trimmed] = { value: nextCurrent };
+  // 运行时值只存「真正的覆盖」：空值不落盘，读取时自然回落到默认值
+  if (isBlankRuntimeValue(nextCurrent)) delete runtime[trimmed];
+  else runtime[trimmed] = { value: nextCurrent };
 
   writeGlobalVars(target, defaults);
   writeGlobalVarsHistory(target, runtime);

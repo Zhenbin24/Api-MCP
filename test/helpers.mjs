@@ -4,10 +4,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-/** 建一个临时 Apipost 单机版数据根，结构与官方一致 */
+/** 建一个临时的本软件数据根，结构与 ensureDataRoot 初始化出来的一致 */
 export function makeTempRoot() {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'apipost-mcp-test-'));
-  const root = path.join(base, 'Apipost单机版');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'apimcp-test-'));
+  const root = path.join(base, 'ApiMCP', 'data');
 
   // 隔离本软件自身配置，避免测试写到真实 %APPDATA%\ApiMCP
   process.env.APIMCP_HOME = path.join(base, 'mcp-home');
@@ -101,7 +101,7 @@ export function cleanup(base) {
 export async function makeContext({ root }, overrides = {}) {
   const { ToolContext } = await import('../src/mcp/tools.js');
   return new ToolContext({
-    officialRoot: root,
+    dataRoot: root,
     config: {
       enabled: true,
       allowed_project_ids: [],

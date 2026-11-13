@@ -30,7 +30,7 @@ import {
   executionsDir,
   flowsDir,
   runsDir,
-  officialMtime
+  projectsIndexMtime
 } from './paths.js';
 
 export const DEFAULT_GLOBAL_PARAMS = {
@@ -174,7 +174,7 @@ export function assertProject(root, projectId) {
   if (!projectId) throw new Error('缺少 project_id');
   const project = getProject(root, projectId);
   if (!project) {
-    throw new Error(`项目不存在或未登记：${projectId}。请先用 apipost_list_projects 查询可用项目。`);
+    throw new Error(`项目不存在或未登记：${projectId}。请先用 apimcp_list_projects 查询可用项目。`);
   }
   return project;
 }
@@ -202,7 +202,7 @@ export function createProject(root, { name, intro = '', storagePath = null } = {
   if (trimmed.length > 64) throw new Error('项目名称不能超过 64 个字符');
   if (String(intro || '').length > 1024) throw new Error('项目描述不能超过 1024 个字符');
 
-  if (!isDir(root)) throw new Error(`Apipost 单机版数据目录不存在：${root}`);
+  if (!isDir(root)) throw new Error(`数据目录不存在：${root}`);
 
   const existingIds = new Set(listProjects(root).map((p) => p.project_id));
   const projectId = hexId(existingIds);
@@ -245,8 +245,29 @@ export function createProject(root, { name, intro = '', storagePath = null } = {
   };
 }
 
-function buildProjectSkeleton({ projectId, teamId, name, intro, now }) {
-  return {
+/**
+ * 首次初始化数据目录时播种一个默认项目，避免控制台一进来就是空的。
+ *
+ * 幂等：已有任何项目就原样返回第一个，不会重复创建。
+ *
+ * @returns {{created: boolean, project: object|null}}
+ */
+export function ensureDefaultProject(root, { name = '默认项目' } = {}) {
+  const existing = listProjects(root);
+  if (existing.length > 0) return { created: false, project: existing[0] };
+  try {
+    const project = createProject(root, {
+      name,
+      intro: '首次启动时自动创建，可直接改名或删除'
+    });
+    return { created: true, project };
+  } catch {
+    // 播种失败不应阻断启动：控制台仍可手动新建项目
+    return { created: false, project: null };
+  }
+}
+
+function buildProjectSkeleton({ projectId, teamId, name, intro, now }) {  return {
     'project.json': {
       created_at: now,
       intro: intro || '',
@@ -326,7 +347,7 @@ export function deleteProjectDir(root, projectId) {
 export function projectFingerprint(root, projectId) {
   const dir = projectDir(root, projectId);
   if (!isDir(dir)) return null;
-  const parts = [projectId, String(officialMtime(root))];
+  const parts = [projectId, String(projectsIndexMtime(root))];
   try {
     const st = fs.statSync(projectMetaPath(root, projectId));
     parts.push(String(st.mtimeMs));

@@ -1,7 +1,7 @@
 /* 桌面端 preload：只暴露最小能力给页面，保持 contextIsolation + sandbox */
 const { contextBridge, ipcRenderer } = require('electron');
 
-contextBridge.exposeInMainWorld('apipostShell', {
+contextBridge.exposeInMainWorld('apimcpShell', {
   isDesktop: true,
   platform: process.platform,
   /** 让原生标题栏按钮区跟随控制台主题 */

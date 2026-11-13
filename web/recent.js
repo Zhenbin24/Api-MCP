@@ -461,7 +461,7 @@ function renderRecentAll() {
 function viewRecent() {
   const projects = window.__consoleState?.projects || [];
   if (projects.length === 0) {
-    return rEl('div', { class: 'empty' }, '还没有项目。请先在 API 单机版里新建项目。');
+    return rEl('div', { class: 'empty' }, '还没有项目。到「总览」页点「新建项目」即可开始。');
   }
 
   if (!recent.projectId) recent.projectId = projects[0].project_id;

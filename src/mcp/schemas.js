@@ -1,4 +1,4 @@
-/** 30 个与官方一致的 MCP 工具定义（tools/list 返回体） */
+/** 34 个 MCP 工具定义（tools/list 返回体） */
 
 const S = (props, required = []) => ({
   type: 'object',
@@ -41,14 +41,14 @@ const STEP_SCHEMA = {
 
 export const TOOLS = [
   {
-    name: 'apipost_list_projects',
+    name: 'apimcp_list_projects',
     description: '获取已授权访问的 API 项目清单。',
     inputSchema: S({})
   },
   {
-    name: 'apipost_create_project',
+    name: 'apimcp_create_project',
     description:
-      '在 API 单机版数据目录本地新建项目，并自动加入授权列表。新项目会自动同步到工作区，可立刻继续同步接口、环境或创建执行计划。不会切换用户当前正在界面中使用的项目。',
+      '在本软件的数据目录里新建项目，并自动加入授权列表。新项目可立刻用来同步接口、创建环境或创建执行计划。不会切换用户当前正在界面中使用的项目。',
     inputSchema: S(
       {
         name: str('项目名称，最多 64 个字符'),
@@ -59,7 +59,7 @@ export const TOOLS = [
     )
   },
   {
-    name: 'apipost_list_apis',
+    name: 'apimcp_list_apis',
     description: '获取指定项目中的目录、接口与文档清单，可按目录或关键词筛选。',
     inputSchema: S(
       {
@@ -71,13 +71,13 @@ export const TOOLS = [
     )
   },
   {
-    name: 'apipost_get_api_detail',
+    name: 'apimcp_get_api_detail',
     description:
       '获取某个 API 接口或文档的完整详情。返回中 pre_tasks / post_tasks 是该接口自带的前置/后置脚本：单接口执行时会自动运行；业务流执行会忽略它们，只执行业务流步骤自身的 pre_script / post_script。若要执行一个目录模块，请先创建或更新对应的执行计划，再执行该计划。',
     inputSchema: S({ project_id: str(), target_id: str() }, ['project_id', 'target_id'])
   },
   {
-    name: 'apipost_sync_openapi',
+    name: 'apimcp_sync_openapi',
     description:
       '将 OpenAPI 3.0 或 3.1 数据（接口与数据模型）同步到项目（可指定导入目录，默认根目录）。接口覆盖方式默认为 url_and_folder；clear 为清空后导入（指定目录时仅清空该目录下的内容、保留目录本身），请谨慎使用。',
     inputSchema: S(
@@ -112,7 +112,7 @@ export const TOOLS = [
     )
   },
   {
-    name: 'apipost_delete_apis',
+    name: 'apimcp_delete_apis',
     description: '显式删除指定的 API 接口。不会根据 OpenAPI 自动删除任何接口。删除目录会级联删除其下所有内容。',
     inputSchema: S(
       { project_id: str(), target_ids: arr(str()), confirm: bool('必须为 true 才会执行删除') },
@@ -120,9 +120,9 @@ export const TOOLS = [
     )
   },
   {
-    name: 'apipost_execute_api',
+    name: 'apimcp_execute_api',
     description:
-      '严格按 API 中已定义的接口、环境、鉴权、前后置脚本与断言执行一个 HTTP 接口。只能传 target_id 和已定义参数的覆盖值，不能传 URL 或 curl。执行完成后返回 run_id；使用 apipost_get_execution_result 获取完整详情。',
+      '严格按 API 中已定义的接口、环境、鉴权、前后置脚本与断言执行一个 HTTP 接口。只能传 target_id 和已定义参数的覆盖值，不能传 URL 或 curl。执行完成后返回 run_id；使用 apimcp_get_execution_result 获取完整详情。',
     inputSchema: S(
       {
         project_id: str(),
@@ -134,22 +134,22 @@ export const TOOLS = [
     )
   },
   {
-    name: 'apipost_list_environments',
+    name: 'apimcp_list_environments',
     description: '获取指定项目可用的环境及当前环境。创建或更新执行计划前，如需指定 environment_id，先调用本工具获取真实环境 ID。',
     inputSchema: S({ project_id: str() }, ['project_id'])
   },
   {
-    name: 'apipost_switch_environment',
+    name: 'apimcp_switch_environment',
     description: '将指定项目当前使用的环境切换为 environment_id。执行计划已保存的 environment_id 不会被改动。',
     inputSchema: S({ project_id: str(), environment_id: str() }, ['project_id', 'environment_id'])
   },
   {
-    name: 'apipost_create_environment',
+    name: 'apimcp_create_environment',
     description: '在指定项目新建环境。base_url 可选，表示该环境默认服务的地址。',
     inputSchema: S({ project_id: str(), name: str(), base_url: str() }, ['project_id', 'name'])
   },
   {
-    name: 'apipost_update_environment',
+    name: 'apimcp_update_environment',
     description: '修改指定环境的名称和/或默认服务地址。仅传需要修改的字段。',
     inputSchema: S({ project_id: str(), environment_id: str(), name: str(), base_url: str() }, [
       'project_id',
@@ -157,7 +157,7 @@ export const TOOLS = [
     ])
   },
   {
-    name: 'apipost_delete_environment',
+    name: 'apimcp_delete_environment',
     description: '删除指定环境。默认环境不可删除，必须显式传 confirm: true。',
     inputSchema: S(
       { project_id: str(), environment_id: str(), confirm: bool() },
@@ -165,18 +165,18 @@ export const TOOLS = [
     )
   },
   {
-    name: 'apipost_list_environment_servers',
+    name: 'apimcp_list_environment_servers',
     description: '查询项目的服务。传 environment_id 时返回该环境实际使用的服务地址；不传则只查询项目共享服务列表。',
     inputSchema: S({ project_id: str(), environment_id: str() }, ['project_id'])
   },
   {
-    name: 'apipost_create_environment_server',
+    name: 'apimcp_create_environment_server',
     description:
       '向项目新增一个共享服务。若同时传 environment_id 与 base_url，会为该环境设置该服务地址；其他环境地址保持为空。',
     inputSchema: S({ project_id: str(), name: str(), environment_id: str(), base_url: str() }, ['project_id', 'name'])
   },
   {
-    name: 'apipost_update_environment_server',
+    name: 'apimcp_update_environment_server',
     description: '修改共享服务名称，或指定某环境后修改该环境内的服务地址。修改 base_url 时必须同时传 environment_id。',
     inputSchema: S(
       { project_id: str(), server_id: str(), name: str(), environment_id: str(), base_url: str() },
@@ -184,17 +184,17 @@ export const TOOLS = [
     )
   },
   {
-    name: 'apipost_delete_environment_server',
+    name: 'apimcp_delete_environment_server',
     description: '从项目所有环境中删除指定服务，必须显式传 confirm: true。',
     inputSchema: S({ project_id: str(), server_id: str(), confirm: bool() }, ['project_id', 'server_id', 'confirm'])
   },
   {
-    name: 'apipost_get_environment_variables',
+    name: 'apimcp_get_environment_variables',
     description: '读取指定环境的变量，返回默认值 value 与当前运行时值 current_value。',
     inputSchema: S({ project_id: str(), environment_id: str() }, ['project_id', 'environment_id'])
   },
   {
-    name: 'apipost_upsert_environment_variable',
+    name: 'apimcp_upsert_environment_variable',
     description:
       '新增或修改环境变量。仅传需要修改的 value、current_value、description；current_value 是当前运行时值，会被后续执行步骤引用。',
     inputSchema: S(
@@ -210,7 +210,7 @@ export const TOOLS = [
     )
   },
   {
-    name: 'apipost_delete_environment_variable',
+    name: 'apimcp_delete_environment_variable',
     description: '删除指定环境变量的默认值与当前运行时值，必须显式传 confirm: true。',
     inputSchema: S(
       { project_id: str(), environment_id: str(), key: str(), confirm: bool() },
@@ -218,12 +218,12 @@ export const TOOLS = [
     )
   },
   {
-    name: 'apipost_get_global_variables',
+    name: 'apimcp_get_global_variables',
     description: '读取项目全局变量，返回默认值 value 与当前运行时值 current_value。',
     inputSchema: S({ project_id: str() }, ['project_id'])
   },
   {
-    name: 'apipost_upsert_global_variable',
+    name: 'apimcp_upsert_global_variable',
     description: '新增或修改全局变量。仅传需要修改的 value、current_value、description。',
     inputSchema: S({ project_id: str(), key: str(), value: {}, current_value: {}, description: str() }, [
       'project_id',
@@ -231,18 +231,18 @@ export const TOOLS = [
     ])
   },
   {
-    name: 'apipost_delete_global_variable',
+    name: 'apimcp_delete_global_variable',
     description: '删除全局变量的默认值与当前运行时值，必须显式传 confirm: true。',
     inputSchema: S({ project_id: str(), key: str(), confirm: bool() }, ['project_id', 'key', 'confirm'])
   },
   {
-    name: 'apipost_get_global_params',
+    name: 'apimcp_get_global_params',
     description:
       '读取项目全局参数。返回 header / query / cookie / body / auth / pre_tasks / post_tasks；这些配置会合并进项目下每个接口的请求，接口自身的同名参数优先。',
     inputSchema: S({ project_id: str() }, ['project_id'])
   },
   {
-    name: 'apipost_update_global_params',
+    name: 'apimcp_update_global_params',
     description:
       '局部更新项目全局参数：只覆盖传入的 section。header / query / cookie 传参数数组即整体替换该节（[{key,value,description,is_checked,field_type}]）；body 仅支持 mode=none|form-data|urlencoded；auth 为浅合并；pre_tasks / post_tasks 传数组整体替换。',
     inputSchema: S(
@@ -260,9 +260,9 @@ export const TOOLS = [
     )
   },
   {
-    name: 'apipost_create_execution_flow',
+    name: 'apimcp_create_execution_flow',
     description:
-      '向项目创建一个执行计划。每一步必须引用当前项目中已定义的 HTTP 接口 target_id；同一 target_id 可以出现多次，每次都是参数、认证、Cookie 与脚本独立的执行步骤。【强制】在构造 steps 之前，必须对每个 step 的 target_id 重新调用 apipost_get_api_detail 获取最新接口详情；禁止使用本次对话早期缓存的数据。新加入计划的接口会固化为独立步骤快照，之后 API 的修改不会自动改变该步骤。业务流会忽略接口自带 pre_tasks / post_tasks，只执行本步骤传入的 pre_script / post_script。跨步骤传值：可在任意步骤用 post_script 从响应提取字段写入环境变量（如 apt.environment.set("token", apt.response.json().token)），后续步骤的 input 里用 {{变量名}} 引用。',
+      '向项目创建一个执行计划。每一步必须引用当前项目中已定义的 HTTP 接口 target_id；同一 target_id 可以出现多次，每次都是参数、认证、Cookie 与脚本独立的执行步骤。【强制】在构造 steps 之前，必须对每个 step 的 target_id 重新调用 apimcp_get_api_detail 获取最新接口详情；禁止使用本次对话早期缓存的数据。新加入计划的接口会固化为独立步骤快照，之后 API 的修改不会自动改变该步骤。业务流会忽略接口自带 pre_tasks / post_tasks，只执行本步骤传入的 pre_script / post_script。跨步骤传值：可在任意步骤用 post_script 从响应提取字段写入环境变量（如 apt.environment.set("token", apt.response.json().token)），后续步骤的 input 里用 {{变量名}} 引用。',
     inputSchema: S(
       {
         project_id: str(),
@@ -275,9 +275,9 @@ export const TOOLS = [
     )
   },
   {
-    name: 'apipost_update_execution_flow',
+    name: 'apimcp_update_execution_flow',
     description:
-      '更新已有执行计划的名称、说明、环境或步骤。计划执行期间不能更新；【强制】先调用 apipost_get_execution_flow 获取当前计划完整详情。steps 传入后会完整替换原步骤：保留或修改已有步骤时必须带回其 step_id；要新增步骤（包括再次添加相同 target_id）则不要传 step_id。业务流会忽略接口自带 pre_tasks / post_tasks，只执行本步骤传入的 pre_script / post_script。',
+      '更新已有执行计划的名称、说明、环境或步骤。计划执行期间不能更新；【强制】先调用 apimcp_get_execution_flow 获取当前计划完整详情。steps 传入后会完整替换原步骤：保留或修改已有步骤时必须带回其 step_id；要新增步骤（包括再次添加相同 target_id）则不要传 step_id。业务流会忽略接口自带 pre_tasks / post_tasks，只执行本步骤传入的 pre_script / post_script。',
     inputSchema: S(
       {
         project_id: str(),
@@ -291,24 +291,24 @@ export const TOOLS = [
     )
   },
   {
-    name: 'apipost_list_execution_flows',
+    name: 'apimcp_list_execution_flows',
     description:
-      '获取项目中的执行计划摘要（名称、环境、步骤数量、更新时间）。不返回步骤和接口快照；需要查看或修改某条计划时，必须再调用 apipost_get_execution_flow。',
+      '获取项目中的执行计划摘要（名称、环境、步骤数量、更新时间）。不返回步骤和接口快照；需要查看或修改某条计划时，必须再调用 apimcp_get_execution_flow。',
     inputSchema: S({ project_id: str() }, ['project_id'])
   },
   {
-    name: 'apipost_get_execution_flow',
+    name: 'apimcp_get_execution_flow',
     description:
-      '获取一条执行计划的完整详情，包括步骤顺序、接口快照、参数覆盖、认证、Cookie 和步骤脚本。修改已有计划前，先调用此工具读取当前计划；再针对每个步骤调用 apipost_get_api_detail 获取最新 API 作为编排参考。',
+      '获取一条执行计划的完整详情，包括步骤顺序、接口快照、参数覆盖、认证、Cookie 和步骤脚本。修改已有计划前，先调用此工具读取当前计划；再针对每个步骤调用 apimcp_get_api_detail 获取最新 API 作为编排参考。',
     inputSchema: S({ project_id: str(), flow_id: str() }, ['project_id', 'flow_id'])
   },
   {
-    name: 'apipost_delete_execution_flow',
+    name: 'apimcp_delete_execution_flow',
     description: '删除指定执行计划，不会删除历史执行记录。计划执行中不可删除，必须显式传 confirm: true。',
     inputSchema: S({ project_id: str(), flow_id: str(), confirm: bool() }, ['project_id', 'flow_id', 'confirm'])
   },
   {
-    name: 'apipost_execute_flow',
+    name: 'apimcp_execute_flow',
     description:
       '串行执行一个执行计划，严格使用计划中已保存的接口快照、顺序、鉴权、脚本和断言。默认使用计划已保存的环境；传入 environment_id 可仅对本次执行覆盖。执行时不会读取或同步 API 的后续修改。执行完成后返回 run_id。',
     inputSchema: S({ project_id: str(), flow_id: str(), environment_id: str('可选，仅对本次执行覆盖环境') }, [
@@ -317,9 +317,9 @@ export const TOOLS = [
     ])
   },
   {
-    name: 'apipost_list_execution_runs',
+    name: 'apimcp_list_execution_runs',
     description:
-      '查询项目最近保留的执行历史摘要（最多 50 条，按最新优先）。可按执行范围、来源、状态或执行计划筛选；结果只含状态、耗时和失败步骤摘要，不含请求/响应详情。需要诊断某次执行时，再使用 apipost_get_execution_result 并传入 run_id。',
+      '查询项目最近保留的执行历史摘要（最多 50 条，按最新优先）。可按执行范围、来源、状态或执行计划筛选；结果只含状态、耗时和失败步骤摘要，不含请求/响应详情。需要诊断某次执行时，再使用 apimcp_get_execution_result 并传入 run_id。',
     inputSchema: S(
       {
         project_id: str(),
@@ -333,10 +333,51 @@ export const TOOLS = [
     )
   },
   {
-    name: 'apipost_get_execution_result',
+    name: 'apimcp_get_execution_result',
     description:
-      '根据 run_id 获取一次执行的完整结果，包括每个接口的请求、响应、断言、脚本日志、提取变量，用于诊断失败步骤。可先用 apipost_list_execution_runs 查找目标 run_id。',
+      '根据 run_id 获取一次执行的完整结果，包括每个接口的请求、响应、断言、脚本日志、提取变量，用于诊断失败步骤。可先用 apimcp_list_execution_runs 查找目标 run_id。',
     inputSchema: S({ project_id: str(), run_id: str() }, ['project_id', 'run_id'])
+  },
+  {
+    name: 'apimcp_import_project',
+    description:
+      '把外部接口文档导入项目，支持 OpenAPI 3.x、Swagger 2.0（自动升级）、Postman Collection v2.1、HAR 与 cURL。format 传 auto 时自动识别。payload 可以是 JSON/YAML 文本，也可以直接传已解析的对象（cURL 必须传文本）。导入结果返回 created/updated/skipped 计数与逐条明细；warnings 里会列出需要人工确认的地方（例如 Postman 变量未定义）。',
+    inputSchema: S(
+      {
+        project_id: str(),
+        format: {
+          type: 'string',
+          enum: ['auto', 'openapi', 'swagger', 'postman', 'har', 'curl'],
+          description: '可选，导入格式；默认 auto 自动识别'
+        },
+        payload: { description: '待导入的文档内容：JSON/YAML 文本、已解析对象，或 cURL 命令文本' },
+        folder_id: str('可选。导入到指定目录的 target_id；不传则导入项目根目录'),
+        api_cover_mode: {
+          type: 'string',
+          enum: ['url_and_folder', 'url', 'ignore', 'both', 'clear'],
+          description:
+            '可选，同名接口处理方式。url_and_folder（默认）同目录同方法同 URL 覆盖；url 同方法同 URL 覆盖（跨目录）；ignore 跳过已存在；both 一律新建；clear 先清空目标目录再导入'
+        },
+        base_path: bool('可选，仅 OpenAPI/Swagger 生效：把 servers[0].url 拼到每个接口 URL 前面')
+      },
+      ['project_id', 'payload']
+    )
+  },
+  {
+    name: 'apimcp_export_project',
+    description:
+      '把项目导出成通用接口文档，便于迁移或分享。支持 OpenAPI 3.0（JSON 或 YAML）与 Postman Collection v2.1。只导出 HTTP 接口，目录层级会转成 OpenAPI tags 或 Postman 嵌套目录；返回内容里含 filename、mime 与完整文本。',
+    inputSchema: S(
+      {
+        project_id: str(),
+        format: {
+          type: 'string',
+          enum: ['openapi', 'openapi_yaml', 'postman'],
+          description: '可选，导出格式；默认 openapi（OpenAPI 3.0 JSON）'
+        }
+      },
+      ['project_id']
+    )
   }
 ];
 

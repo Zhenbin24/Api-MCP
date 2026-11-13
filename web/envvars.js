@@ -125,6 +125,30 @@ function evHint(text, cls = '') {
   return evEl('div', { class: `hint ${cls}`.trim() }, text);
 }
 
+/**
+ * 使用说明卡片：可折叠（默认展开），内容是段落 / 列表 / 代码块的组合。
+ * @param {string} title 卡片标题（即折叠标题）
+ * @param {Array<string|{type:string,text?:string,items?:string[],code?:string}>} items
+ */
+function evDoc(title, items) {
+  const blocks = (items || []).map((item) => {
+    if (typeof item === 'string') return evEl('p', {}, item);
+    if (item?.type === 'list') {
+      return evEl('ul', {}, ...(item.items || []).map((text) => evEl('li', {}, text)));
+    }
+    if (item?.type === 'code') return evEl('pre', { class: 'ev-doc-code' }, evEl('code', {}, item.code || ''));
+    if (item?.type === 'p') return evEl('p', {}, item.text || '');
+    return null;
+  });
+
+  return evEl(
+    'details',
+    { class: 'ev-doc', open: true },
+    evEl('summary', {}, title),
+    evEl('div', { class: 'ev-doc-body' }, ...blocks.filter(Boolean))
+  );
+}
+
 function evDirtyBadge(scope) {
   return evEl('span', {
     class: 'tag warn',
@@ -448,13 +472,31 @@ function envDetailPane(env) {
         evEl('tbody', {}, ...serverRows)
       ),
       evEl('div', { class: 'btn-row' }, addServerBtn)
-    )
+    ),
+    envDocCard()
   );
 }
 
 function pickEnv(envId) {
   evState.activeEnvId = envId;
   renderAll();
+}
+
+/* ---------------- 使用说明卡片 ---------------- */
+
+/** 环境页签底部：环境与变量怎么用 */
+function envDocCard() {
+  return evDoc('使用说明：环境、变量与服务', [
+    { type: 'p', text: '环境 = 一套变量 + 一组服务地址。顶部当前环境决定「调试 / 发送 / 执行计划」实际使用哪一套配置，切环境即切整套地址与变量。' },
+    { type: 'list', items: [
+      '「默认值」是环境的基线配置；「当前值」是运行时实际取用的值。脚本 apt.environment.set 写入的是当前值。',
+      '请求 URL、Header、Query、Body、鉴权、脚本里都可以用 {{变量名}} 引用变量，变量值里还能再嵌套 {{...}}，最多递归 5 层。',
+      '服务（前置 URL）即 server_id=1 的地址是默认服务；目录可指定其它服务，其下接口优先使用该服务的地址。'
+    ] },
+    { type: 'p', text: '内置变量（无需定义，每次渲染即时生成）：' },
+    { type: 'code', code: '{{$timestamp}}    秒级时间戳\n{{$timestampMs}}  毫秒时间戳\n{{$randomInt}}    0-999 随机整数\n{{$uuid}} / {{$guid}}  随机 UUID\n{{$isoDate}}      ISO 8601 时间' },
+    { type: 'p', text: '取值优先级：环境当前值 > 环境默认值 > 全局当前值 > 全局默认值。' }
+  ]);
 }
 
 /* ---------------- 页签 2：全局参数 ---------------- */
@@ -477,6 +519,7 @@ function paramsPane() {
   const body = params.body;
   const bodyMode = String(body.mode || 'none');
   const isForm = ['form-data', 'urlencoded'].includes(bodyMode);
+  const cookieNoticeNode = window.ApiDesign.cookieNotice(params.cookie, () => evMark('params'));
 
   const save = async () => {
     try {
@@ -519,18 +562,11 @@ function paramsPane() {
             params.query.parameter = next;
             evMark('params');
           })
-        ),
-        // Cookie
-        evEl(
-          'div',
-          { class: 'param-section' },
-          evEl('div', { class: 'param-section-title' }, 'Cookie 参数', evEl('span', { class: 'tab-badge' }, params.cookie.parameter.length)),
-          window.ApiDesign.paramTable(params.cookie.parameter, (next) => {
-            params.cookie.parameter = next;
-            evMark('params');
-          })
         )
       ),
+      // 历史 Cookie 参数提示（Cookie 表已从界面移除）
+      cookieNoticeNode ? evEl('div', { class: 'mt12' }, cookieNoticeNode) : null,
+      evHint('参数值支持 {{变量名}}；Cookie 请写成 Header：Key = Cookie，Value = a=1; b=2'),
       evEl(
         'div',
         { class: 'form-grid mt16' },
@@ -691,7 +727,20 @@ function paramsPane() {
           }
         }, '重新加载')
       ),
-      evHint('保存后直接写入 API 单机版，重新进入项目即可看到。')
+      evHint('保存后直接写入项目数据目录，即时生效。')
+    ),
+    evDoc(
+      '全局参数怎么用',
+      [
+        { type: 'p', text: '三层继承：全局 → 目录 → 接口。每一层都可以配 Header / Query / Body / 鉴权 / 前后置脚本，发送时按「同名内层优先」合并。' },
+        { type: 'list', items: [
+          '内层把同名参数取消勾选（is_checked = -1）表示禁用外层的这一项，而不是留空。',
+          'Body 仅支持 form-data 与 urlencoded；接口自身的 Body 模式不会被全局参数覆盖。',
+          '前置脚本顺序 全局 → 目录 → 接口，后置脚本顺序 接口 → 目录 → 全局。'
+        ] },
+        { type: 'p', text: 'Cookie 统一写成 Header：Key 填 Cookie，Value 填 a=1; b=2。原来的 Cookie 参数表已移除，历史数据仍会发送，但界面不再展示，可用上方提示块一键复制后清空。' },
+        { type: 'p', text: '参数值支持 {{变量名}}，优先取环境变量，其次全局变量。' }
+      ]
     )
   );
 }
@@ -817,6 +866,19 @@ function varsPane() {
         ),
         evEl('button', { class: 'primary small', onclick: save }, '保存全局变量')
       )
+    ),
+    evDoc(
+      '全局变量怎么用',
+      [
+        { type: 'p', text: '全局变量对整个项目生效，任何接口、目录、脚本都能读；但优先级低于环境变量：同名时以环境变量的值为准。' },
+        { type: 'list', items: [
+          '「默认值」是基线，「当前值」是运行时实际取用的值；脚本 apt.globals.set 写入的是当前值，清空当前值会回落到默认值。',
+          '在请求里用 {{变量名}} 引用，例如 Header 的 x-access-token: {{token}}。',
+          '优先级：环境当前值 > 环境默认值 > 全局当前值 > 全局默认值。'
+        ] },
+        { type: 'p', text: '跨步骤传值（登录后把 token 带到后续接口）：在登录接口的后置脚本里写入，下一步引用。' },
+        { type: 'code', code: '// 步骤 1 后置脚本\napt.environment.set("token", apt.response.json().token);\n\n// 步骤 2 的 Header\nx-access-token: {{token}}' }
+      ]
     )
   );
 }
@@ -871,8 +933,13 @@ function buildPage() {
   );
 
   let pane;
-  if (!projectId) pane = evEl('div', { class: 'empty' }, '还没有项目');
-  else if (evState.tab === 'env') pane = envPane();
+  if (!projectId) {
+    pane = evEl(
+      'div',
+      { class: 'empty' },
+      '还没有项目。请先到「总览」页点「新建项目」创建。'
+    );
+  } else if (evState.tab === 'env') pane = envPane();
   else if (evState.tab === 'params') pane = paramsPane();
   else pane = varsPane();
 
@@ -883,7 +950,7 @@ function buildPage() {
     evEl(
       'p',
       { class: 'page-sub' },
-      '环境（含多 host 服务）、全局参数与全局变量；改动直接写入 API 单机版'
+      '环境（含多 host 服务）、全局参数与全局变量；改动直接写入项目数据目录'
     ),
     evEl(
       'div',

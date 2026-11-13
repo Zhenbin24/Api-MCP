@@ -9,7 +9,7 @@ import { buildEffectiveRequest, resolveChain, mergeChain } from '../src/exec/inh
 import { upsertEnvVariable } from '../src/store/envs.js';
 
 function boot(root, projectId) {
-  return openProject({ officialRoot: root, projectId });
+  return openProject({ dataRoot: root, projectId });
 }
 
 /** 把环境的默认服务地址指向 fake server */
@@ -236,7 +236,7 @@ test('继承：端到端发送时全局 header 与 raw body 变量都生效', as
 
     const { runApi } = await import('../src/exec/runner.js');
     const summary = await runApi({
-      officialRoot: env.root,
+      dataRoot: env.root,
       projectId: env.projectId,
       targetId: api.id,
       input: {},

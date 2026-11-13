@@ -17,7 +17,7 @@ async function boot() {
     data_root: env.root,
     allowed_project_ids: []
   };
-  const instance = createServer({ config, officialRoot: env.root });
+  const instance = createServer({ config, dataRoot: env.root });
   const address = await instance.listen(0);
   const base = `http://127.0.0.1:${address.port}`;
   const headers = { 'X-UI-Token': 'test-ui', 'Content-Type': 'application/json' };
@@ -151,7 +151,7 @@ test('最近：历史发送记录（空 → 有记录）', async () => {
     // 直接写一条 run 记录（避免依赖外网）
     const { openProject } = await import('../src/store/target.js');
     const { saveRun } = await import('../src/store/runs.js');
-    const target = openProject({ officialRoot: env.root, projectId: env.projectId });
+    const target = openProject({ dataRoot: env.root, projectId: env.projectId });
     saveRun(target, {
       run_id: 'run_recent_test',
       project_id: env.projectId,
@@ -206,7 +206,7 @@ test('最近：run 详情接口', async () => {
   try {
     const { openProject } = await import('../src/store/target.js');
     const { saveRun } = await import('../src/store/runs.js');
-    const target = openProject({ officialRoot: env.root, projectId: env.projectId });
+    const target = openProject({ dataRoot: env.root, projectId: env.projectId });
     saveRun(target, {
       run_id: 'run_detail_test',
       project_id: env.projectId,

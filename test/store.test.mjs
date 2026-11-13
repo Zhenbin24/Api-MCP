@@ -21,7 +21,10 @@ import {
   upsertEnvVariable,
   sharedServers,
   createEnvironmentServer,
-  listEnvironmentServers
+  listEnvironmentServers,
+  getGlobalVariables,
+  upsertGlobalVariable,
+  readGlobalVarsHistory
 } from '../src/store/envs.js';
 import { listProjects, createProject } from '../src/store/projects.js';
 import { createFlow, getFlow, listFlows } from '../src/store/flows.js';
@@ -30,7 +33,7 @@ import { listRuns, saveRun, getRun } from '../src/store/runs.js';
 test('存储：读写直连官方目录，不再经过工作区', () => {
   const env = makeTempRoot();
   try {
-    const target = openProject({ officialRoot: env.root, projectId: env.projectId });
+    const target = openProject({ dataRoot: env.root, projectId: env.projectId });
 
     // project 区 -> offline-data；local 区 -> offline-data-local
     assert.equal(target.abs('project/project.json'), path.join(env.root, 'offline-data', env.projectId, 'project.json'));
@@ -77,7 +80,7 @@ test('存储：项目列表与新建项目骨架', () => {
 test('存储：建接口、读详情、删除级联', () => {
   const env = makeTempRoot();
   try {
-    const target = openProject({ officialRoot: env.root, projectId: env.projectId });
+    const target = openProject({ dataRoot: env.root, projectId: env.projectId });
 
     const folder = createApiOrFolder(target, { name: '用户模块', targetType: TARGET_TYPE.FOLDER });
     assert.equal(folder.target_type, 'folder');
@@ -115,7 +118,7 @@ test('存储：建接口、读详情、删除级联', () => {
 test('存储：环境 CRUD、共享服务、变量双写', () => {
   const env = makeTempRoot();
   try {
-    const target = openProject({ officialRoot: env.root, projectId: env.projectId });
+    const target = openProject({ dataRoot: env.root, projectId: env.projectId });
 
     const envs = listEnvironments(target);
     assert.equal(envs.length, 2);
@@ -146,10 +149,73 @@ test('存储：环境 CRUD、共享服务、变量双写', () => {
   }
 });
 
+test('存储：当前值留空时回落到默认值，不把默认值压成空', () => {
+  const env = makeTempRoot();
+  try {
+    const target = openProject({ dataRoot: env.root, projectId: env.projectId });
+
+    // 环境变量：控制台整表保存时，空的当前值会以 '' 传进来
+    upsertEnvVariable(target, { envId: '1', key: 'token', value: 'jwt-abc', currentValue: '' });
+    let vars = getEnvironmentVariables(target, '1').variables;
+    assert.equal(vars.find((v) => v.key === 'token').current_value, 'jwt-abc');
+    assert.equal(target.readJson('local/env_vars_history.json')['1'].token.value, 'jwt-abc');
+
+    // 全局变量：走 upsert 单条保存，同样是空串
+    upsertGlobalVariable(target, { key: 'token', value: 'jwt-abc', currentValue: '' });
+    vars = getGlobalVariables(target).variables;
+    assert.equal(vars.find((v) => v.key === 'token').current_value, 'jwt-abc');
+    assert.equal(readGlobalVarsHistory(target).token.value, 'jwt-abc');
+
+    // 历史里已经存在空串脏数据时，读取要自动丢弃，执行侧拿到的仍是默认值
+    target.writeJson('local/global_vars_history.json', { token: { value: '' } });
+    target.writeJson('local/env_vars_history.json', { 1: { token: { value: '' } } });
+    assert.equal(readGlobalVarsHistory(target).token, undefined);
+    assert.equal(getGlobalVariables(target).variables.find((v) => v.key === 'token').current_value, 'jwt-abc');
+
+    // 显式写了非空当前值，仍以当前值为准
+    upsertGlobalVariable(target, { key: 'token', value: 'jwt-abc', currentValue: 'jwt-runtime' });
+    assert.equal(getGlobalVariables(target).variables.find((v) => v.key === 'token').current_value, 'jwt-runtime');
+    assert.equal(readGlobalVarsHistory(target).token.value, 'jwt-runtime');
+  } finally {
+    cleanup(env.base);
+  }
+});
+
+test('存储：控制台读回再保存不会把运行时值固化成脏数据', () => {
+  const env = makeTempRoot();
+  try {
+    const target = openProject({ dataRoot: env.root, projectId: env.projectId });
+
+    // 默认值有值、当前值留空：history 里不应该出现空串
+    upsertGlobalVariable(target, { key: 'token', value: 'jwt-abc', currentValue: '' });
+    assert.deepEqual(readGlobalVarsHistory(target), { token: { value: 'jwt-abc' } });
+
+    // 前端是 GET 后整表 POST 回来：current_value 是回落的生效值，不应改变语义
+    const readBack = () => getGlobalVariables(target).variables.find((v) => v.key === 'token');
+    const first = readBack();
+    upsertGlobalVariable(target, { key: first.key, value: first.value, currentValue: first.current_value });
+    assert.deepEqual(readGlobalVarsHistory(target), { token: { value: 'jwt-abc' } });
+
+    // 用户改默认值、前端仍把旧的当前值一起回传：未动过当前值，要跟着新默认值走
+    const second = readBack();
+    upsertGlobalVariable(target, { key: 'token', value: 'jwt-NEW', currentValue: second.current_value });
+    assert.deepEqual(readGlobalVarsHistory(target), { token: { value: 'jwt-NEW' } });
+    assert.equal(readBack().current_value, 'jwt-NEW');
+
+    // 用户明确把当前值改成别的值，改默认值不能覆盖它
+    upsertGlobalVariable(target, { key: 'token', value: 'jwt-NEW', currentValue: 'runtime-manual' });
+    upsertGlobalVariable(target, { key: 'token', value: 'jwt-NEW2', currentValue: 'runtime-manual' });
+    assert.equal(readBack().current_value, 'runtime-manual');
+    assert.equal(readBack().value, 'jwt-NEW2');
+  } finally {
+    cleanup(env.base);
+  }
+});
+
 test('存储：执行计划 CRUD 保留 step_id 快照', () => {
   const env = makeTempRoot();
   try {
-    const target = openProject({ officialRoot: env.root, projectId: env.projectId });
+    const target = openProject({ dataRoot: env.root, projectId: env.projectId });
 
     const api = createApiOrFolder(target, { name: 'ping', method: 'GET', url: 'https://api.test/ping' });
     const snapshot = readApiFile(target, api.target_id).data;
@@ -173,7 +239,7 @@ test('存储：执行计划 CRUD 保留 step_id 快照', () => {
 test('存储：执行记录裁剪到 50 条', () => {
   const env = makeTempRoot();
   try {
-    const target = openProject({ officialRoot: env.root, projectId: env.projectId });
+    const target = openProject({ dataRoot: env.root, projectId: env.projectId });
 
     for (let i = 0; i < 55; i += 1) {
       saveRun(target, {

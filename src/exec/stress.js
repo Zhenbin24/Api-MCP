@@ -69,7 +69,7 @@ export function summarize(timings, failures, statusCodes, totalElapsedMs) {
 /**
  * 执行压测。
  * @param {object} opts
- * @param {string} opts.officialRoot
+ * @param {string} opts.dataRoot
  * @param {string} opts.projectId
  * @param {string} opts.targetId
  * @param {number} opts.concurrency   并发数（>=1）
@@ -82,7 +82,7 @@ export function summarize(timings, failures, statusCodes, totalElapsedMs) {
  */
 export async function runStress(opts) {
   const {
-    officialRoot,
+    dataRoot,
     projectId,
     targetId,
     concurrency = 1,
@@ -94,7 +94,7 @@ export async function runStress(opts) {
     onProgress = null
   } = opts;
 
-  const target = openProject({ officialRoot, projectId });
+  const target = openProject({ dataRoot, projectId });
   const item = findApiItem(target, targetId);
   if (!item) throw new Error(`接口不存在：${targetId}`);
   if (item.target_type !== TARGET_TYPE.API) {

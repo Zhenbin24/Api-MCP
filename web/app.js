@@ -1,8 +1,8 @@
 /* API MCP 控制台 */
 
 const UI_TOKEN = new URLSearchParams(location.search).get('ui') || '';
-/** 桌面端（Electron 壳）注入 apipostShell；浏览器访问时为 undefined */
-const IS_DESKTOP = Boolean(window.apipostShell && window.apipostShell.isDesktop);
+/** 桌面端（Electron 壳）注入 apimcpShell；浏览器访问时为 undefined */
+const IS_DESKTOP = Boolean(window.apimcpShell && window.apimcpShell.isDesktop);
 
 if (IS_DESKTOP) {
   document.addEventListener('DOMContentLoaded', () => document.body.classList.add('is-desktop'));
@@ -10,12 +10,12 @@ if (IS_DESKTOP) {
 
 /** 原生标题栏按钮区跟随主题 */
 function syncTitleBarColors() {
-  if (!IS_DESKTOP || typeof window.apipostShell.setTitleBarColors !== 'function') return;
+  if (!IS_DESKTOP || typeof window.apimcpShell.setTitleBarColors !== 'function') return;
   const style = getComputedStyle(document.documentElement);
   const color = style.getPropertyValue('--bg-header').trim();
   const symbolColor = style.getPropertyValue('--font-title').trim();
   if (!color || !symbolColor) return;
-  window.apipostShell.setTitleBarColors({ color, symbolColor });
+  window.apimcpShell.setTitleBarColors({ color, symbolColor });
 }
 
 const api = {
@@ -329,6 +329,7 @@ async function loadProjectData(projectId) {
 
 const DEFAULT_NAV = [
   { key: 'design', label: '接口设计', icon: '✎' },
+  { key: 'transfer', label: '导入导出', icon: '⇅' },
   { key: 'envvars', label: '环境与变量', icon: '⛁' },
   { key: 'recent', label: '最近', icon: '◷' },
   { key: 'overview', label: '总览', icon: '◉' },
@@ -483,9 +484,9 @@ function viewOverview() {
     'div',
     {},
     el('h1', { class: 'page-title' }, '总览'),
-    el('p', { class: 'page-sub' }, 'API 单机版 MCP 服务'),
+    el('p', { class: 'page-sub' }, '本地 API MCP 服务'),
 
-    !s.official_root_ok
+    !s.data_root_ok
       ? el(
           'div',
           { class: 'notice' },
@@ -493,8 +494,8 @@ function viewOverview() {
           el(
             'div',
             {},
-            '未找到 API 单机版数据目录。请先安装并打开 API 单机版，或在「外观设置」中指定数据目录。',
-            el('div', { class: 'hint mt8' }, `当前探测路径：${s.official_root}`)
+            '数据目录不可用（无法创建或没有写权限）。请在「外观设置」中指定其它目录后重启服务。',
+            el('div', { class: 'hint mt8' }, `当前数据目录：${s.data_root || '-'}`)
           )
         )
       : null,
@@ -673,17 +674,17 @@ function viewOverview() {
         el(
           'div',
           { class: 'kv' },
-          el('span', { class: 'k' }, '官方目录'),
-          el('span', { class: 'v mono' }, s.official_root || '-'),
+          el('span', { class: 'k' }, '数据目录'),
+          el('span', { class: 'v mono' }, s.data_root || '-'),
           el('span', { class: 'k' }, '项目数'),
           el('span', { class: 'v' }, `${state.projects.length} 个（已授权 ${authorized || '全部'}）`),
           el('span', { class: 'k' }, '读写方式'),
-          el('span', { class: 'v' }, el('span', { class: 'tag ok' }, '直连官方目录'))
+          el('span', { class: 'v' }, el('span', { class: 'tag ok' }, '本地读写'))
         ),
         el(
           'div',
           { class: 'hint mt12' },
-          '所有改动直接写入 API 单机版目录，API 单机版重新进入项目即可看到。'
+          '所有改动直接写入本软件的数据目录，保存后即时生效，无需手动同步。'
         )
       )
     ),
@@ -702,9 +703,9 @@ function viewOverview() {
           { class: 'hint' },
           '1. 打开「客户端配置」，复制 Cursor 的一段配置到 ~/.cursor/mcp.json',
           el('br'),
-          '2. 重启 Cursor，在对话里让它调用 apipost_list_projects',
+          '2. 重启 Cursor，在对话里让它调用 apimcp_list_projects',
           el('br'),
-          '3. 改完接口保存即写入 API 单机版，重新进入项目即可看到'
+          '3. 改完接口保存即写入数据目录，刷新页面就能看到'
         ),
         el(
           'div',
@@ -741,6 +742,62 @@ function toggleProjectAuthorization(projectId, checked) {
       toast(checked ? '已授权' : '已取消授权');
     })
     .catch((err) => toast(err.message, true));
+}
+
+/** 新建项目弹窗：空数据目录下唯一的入口 */
+function openCreateProjectDialog() {
+  const nameInput = el('input', { type: 'text', placeholder: '项目名称，最多 64 个字符' });
+  const introInput = el('textarea', { rows: '3', placeholder: '项目说明（可选）' });
+  const errorLine = el('div', { class: 'hint', style: 'color:var(--color-error)' });
+
+  const submit = async () => {
+    const name = nameInput.value.trim();
+    if (!name) {
+      errorLine.textContent = '请填写项目名称';
+      nameInput.focus();
+      return;
+    }
+    try {
+      const res = await api.post('/projects', { name, intro: introInput.value.trim() });
+      closeModal();
+      await refreshProjects();
+      const created = res?.project;
+      if (created?.project_id) {
+        // 项目/环境/设计器三处状态一起切到新项目，否则设计页还会停在空状态
+        state.currentProjectId = created.project_id;
+        state.designProjectId = created.project_id;
+        if (window.ApiDesign?.state) {
+          window.ApiDesign.state.projectId = created.project_id;
+          window.ApiDesign.state.selectedId = null;
+          window.ApiDesign.state.data = null;
+          window.ApiDesign.state.tree = [];
+          window.ApiDesign.state.apiIndex = [];
+        }
+        await refreshEnvironments(created.project_id);
+      }
+      render();
+      toast(`项目「${created?.name || name}」已创建`);
+    } catch (err) {
+      errorLine.textContent = err.message;
+    }
+  };
+
+  showModal(
+    '新建项目',
+    el(
+      'div',
+      { class: 'row-gap' },
+      el('div', { class: 'hint' }, '项目数据会保存在本软件的数据目录里，可立即用来设计接口。'),
+      nameInput,
+      introInput,
+      errorLine
+    ),
+    [
+      el('button', { onclick: () => closeModal() }, '取消'),
+      el('button', { class: 'primary', onclick: submit }, '创建')
+    ]
+  );
+  nameInput.focus();
 }
 
 /** 「总览」里的项目授权卡片：勾选决定 MCP 是否能访问该项目 */
@@ -787,12 +844,24 @@ function projectAuthSection() {
   return el(
     'div',
     { class: 'section' },
-    el('div', { class: 'section-title' }, '项目授权'),
+    el(
+      'div',
+      { class: 'section-head' },
+      el('div', { class: 'section-title' }, '项目授权'),
+      el('button', { class: 'small primary', onclick: openCreateProjectDialog }, '+ 新建项目')
+    ),
     el(
       'div',
       { class: 'card' },
       state.projects.length === 0
-        ? el('div', { class: 'empty' }, '还没有发现任何项目。请先在 API 单机版里新建项目。')
+        ? el(
+            'div',
+            { class: 'empty' },
+            '还没有项目。',
+            el('div', { class: 'mt12' },
+              el('button', { class: 'primary', onclick: openCreateProjectDialog }, '+ 新建项目')
+            )
+          )
         : el(
             'div',
             { class: 'table-wrap' },
@@ -1024,7 +1093,7 @@ async function viewClients() {
       el(
         'div',
         {},
-        `stdio 模式（推荐）：客户端拉起的命令是 "${cfg.command} --stdio"，直接读取 API 单机版数据。`,
+        `stdio 模式（推荐）：客户端拉起的命令是 "${cfg.command} --stdio"，直接读取本软件的数据目录。`,
         el('br'),
         'HTTP 模式需把 <token> 换成上方总览里显示的 Bearer Token。'
       )
@@ -1103,11 +1172,12 @@ async function viewClients() {
 
 function viewTools() {
   const groups = [
-    ['项目与 API', ['apipost_list_projects', 'apipost_create_project', 'apipost_list_apis', 'apipost_get_api_detail', 'apipost_sync_openapi', 'apipost_delete_apis']],
-    ['接口执行', ['apipost_execute_api']],
-    ['环境与变量', ['apipost_list_environments', 'apipost_switch_environment', 'apipost_create_environment', 'apipost_update_environment', 'apipost_delete_environment', 'apipost_list_environment_servers', 'apipost_create_environment_server', 'apipost_update_environment_server', 'apipost_delete_environment_server', 'apipost_get_environment_variables', 'apipost_upsert_environment_variable', 'apipost_delete_environment_variable', 'apipost_get_global_variables', 'apipost_upsert_global_variable', 'apipost_delete_global_variable', 'apipost_get_global_params', 'apipost_update_global_params']],
-    ['执行计划', ['apipost_create_execution_flow', 'apipost_update_execution_flow', 'apipost_list_execution_flows', 'apipost_get_execution_flow', 'apipost_delete_execution_flow', 'apipost_execute_flow']],
-    ['执行历史', ['apipost_list_execution_runs', 'apipost_get_execution_result']]
+    ['项目与 API', ['apimcp_list_projects', 'apimcp_create_project', 'apimcp_list_apis', 'apimcp_get_api_detail', 'apimcp_sync_openapi', 'apimcp_delete_apis']],
+    ['接口执行', ['apimcp_execute_api']],
+    ['环境与变量', ['apimcp_list_environments', 'apimcp_switch_environment', 'apimcp_create_environment', 'apimcp_update_environment', 'apimcp_delete_environment', 'apimcp_list_environment_servers', 'apimcp_create_environment_server', 'apimcp_update_environment_server', 'apimcp_delete_environment_server', 'apimcp_get_environment_variables', 'apimcp_upsert_environment_variable', 'apimcp_delete_environment_variable', 'apimcp_get_global_variables', 'apimcp_upsert_global_variable', 'apimcp_delete_global_variable', 'apimcp_get_global_params', 'apimcp_update_global_params']],
+    ['执行计划', ['apimcp_create_execution_flow', 'apimcp_update_execution_flow', 'apimcp_list_execution_flows', 'apimcp_get_execution_flow', 'apimcp_delete_execution_flow', 'apimcp_execute_flow']],
+    ['执行历史', ['apimcp_list_execution_runs', 'apimcp_get_execution_result']],
+    ['导入导出', ['apimcp_import_project', 'apimcp_export_project']]
   ];
 
   const known = new Set(groups.flatMap((g) => g[1]));
@@ -1117,7 +1187,7 @@ function viewTools() {
     'div',
     {},
     el('h1', { class: 'page-title' }, '工具清单'),
-    el('p', { class: 'page-sub' }, `共 ${total} 个 apipost_* 工具（官方 30 个 + 全局参数 2 个）`),
+    el('p', { class: 'page-sub' }, `共 ${total} 个 apimcp_* 工具`),
     ...groups.map(([name, tools]) =>
       el(
         'div',
@@ -1141,38 +1211,38 @@ function viewTools() {
 }
 
 const TOOL_DESC = {
-  apipost_list_projects: '获取已授权项目清单',
-  apipost_create_project: '本地新建项目并自动授权',
-  apipost_list_apis: '查询目录、接口与文档清单',
-  apipost_get_api_detail: '读取接口完整定义、参数、响应和脚本',
-  apipost_sync_openapi: '将 OpenAPI 3.0/3.1 同步到项目',
-  apipost_delete_apis: '按接口 ID 删除（级联子项）',
-  apipost_execute_api: '按定义执行单个 HTTP 接口',
-  apipost_list_environments: '查询项目环境和当前环境',
-  apipost_switch_environment: '切换项目当前执行环境',
-  apipost_create_environment: '新建环境',
-  apipost_update_environment: '修改环境名称或默认服务地址',
-  apipost_delete_environment: '删除指定环境',
-  apipost_list_environment_servers: '查询项目服务与环境地址',
-  apipost_create_environment_server: '新增共享服务并设置环境地址',
-  apipost_update_environment_server: '修改服务名称或环境地址',
-  apipost_delete_environment_server: '删除共享服务',
-  apipost_get_environment_variables: '读取环境变量与运行时值',
-  apipost_upsert_environment_variable: '新增或修改环境变量',
-  apipost_delete_environment_variable: '删除环境变量',
-  apipost_get_global_variables: '读取项目全局变量',
-  apipost_upsert_global_variable: '新增或修改全局变量',
-  apipost_delete_global_variable: '删除全局变量',
-  apipost_get_global_params: '读取项目全局参数（header/query/cookie/body/鉴权/脚本）',
-  apipost_update_global_params: '局部更新全局参数，只覆盖传入的 section',
-  apipost_create_execution_flow: '创建执行计划（固化接口快照）',
-  apipost_update_execution_flow: '更新已有执行计划',
-  apipost_list_execution_flows: '查询执行计划摘要',
-  apipost_get_execution_flow: '读取执行计划完整详情',
-  apipost_delete_execution_flow: '删除指定执行计划',
-  apipost_execute_flow: '串行执行执行计划',
-  apipost_list_execution_runs: '查询执行历史摘要',
-  apipost_get_execution_result: '读取逐步骤请求、响应、断言与日志'
+  apimcp_list_projects: '获取已授权项目清单',
+  apimcp_create_project: '本地新建项目并自动授权',
+  apimcp_list_apis: '查询目录、接口与文档清单',
+  apimcp_get_api_detail: '读取接口完整定义、参数、响应和脚本',
+  apimcp_sync_openapi: '将 OpenAPI 3.0/3.1 同步到项目',
+  apimcp_delete_apis: '按接口 ID 删除（级联子项）',
+  apimcp_execute_api: '按定义执行单个 HTTP 接口',
+  apimcp_list_environments: '查询项目环境和当前环境',
+  apimcp_switch_environment: '切换项目当前执行环境',
+  apimcp_create_environment: '新建环境',
+  apimcp_update_environment: '修改环境名称或默认服务地址',
+  apimcp_delete_environment: '删除指定环境',
+  apimcp_list_environment_servers: '查询项目服务与环境地址',
+  apimcp_create_environment_server: '新增共享服务并设置环境地址',
+  apimcp_update_environment_server: '修改服务名称或环境地址',
+  apimcp_delete_environment_server: '删除共享服务',
+  apimcp_get_environment_variables: '读取环境变量与运行时值',
+  apimcp_upsert_environment_variable: '新增或修改环境变量',
+  apimcp_delete_environment_variable: '删除环境变量',
+  apimcp_get_global_variables: '读取项目全局变量',
+  apimcp_upsert_global_variable: '新增或修改全局变量',
+  apimcp_delete_global_variable: '删除全局变量',
+  apimcp_get_global_params: '读取项目全局参数（header/query/body/鉴权/脚本）',
+  apimcp_update_global_params: '局部更新全局参数，只覆盖传入的 section',
+  apimcp_create_execution_flow: '创建执行计划（固化接口快照）',
+  apimcp_update_execution_flow: '更新已有执行计划',
+  apimcp_list_execution_flows: '查询执行计划摘要',
+  apimcp_get_execution_flow: '读取执行计划完整详情',
+  apimcp_delete_execution_flow: '删除指定执行计划',
+  apimcp_execute_flow: '串行执行执行计划',
+  apimcp_list_execution_runs: '查询执行历史摘要',
+  apimcp_get_execution_result: '读取逐步骤请求、响应、断言与日志'
 };
 
 /* ---------------- 视图：外观设置 ---------------- */
@@ -1200,7 +1270,7 @@ function viewAppearance() {
     'div',
     {},
     el('h1', { class: 'page-title' }, '外观设置'),
-    el('p', { class: 'page-sub' }, '配色取自 API 单机版主题 token'),
+    el('p', { class: 'page-sub' }, '配色取自 Apipost 官方主题 token'),
 
     el(
       'div',
@@ -1247,7 +1317,7 @@ function viewAppearance() {
                 value: cfg.theme_custom_bg || '#faf5ea',
                 onchange: (e) => save({ theme_custom_bg: e.target.value })
               }),
-              el('span', { class: 'hint' }, '侧栏与内容区会按官方公式自动推导')
+              el('span', { class: 'hint' }, '侧栏与内容区会按同一底色自动推导')
             )
           : null,
         el(
@@ -1289,7 +1359,7 @@ function viewAppearance() {
             },
             onchange: (e) => save({ font_scale: Number(e.target.value) })
           }),
-          el('span', { class: 'hint' }, `${cfg.font_scale || 100}%（对应官方 font_scale）`)
+          el('span', { class: 'hint' }, `${cfg.font_scale || 100}%（界面整体缩放比例）`)
         )
       )
     ),
@@ -1307,7 +1377,7 @@ function viewAppearance() {
           el('input', {
             type: 'text',
             value: cfg.data_root || state.status?.official_root || '',
-            placeholder: '留空则自动探测 %APPDATA%\\Apipost单机版',
+            placeholder: '留空则使用 %APPDATA%\\ApiMCP\\data',
             onchange: (e) => save({ data_root: e.target.value || null })
           }),
           el(
@@ -1336,7 +1406,7 @@ function viewAbout() {
     'div',
     {},
     el('h1', { class: 'page-title' }, '关于'),
-    el('p', { class: 'page-sub' }, 'API MCP v1.0.0'),
+    el('p', { class: 'page-sub' }, `API MCP v${s.version || ''}`),
     el(
       'div',
       { class: 'card' },
@@ -1344,7 +1414,7 @@ function viewAbout() {
         'div',
         { class: 'kv' },
         el('span', { class: 'k' }, '版本'),
-        el('span', { class: 'v' }, '1.0.0'),
+        el('span', { class: 'v' }, s.version || '-'),
         el('span', { class: 'k' }, 'Node'),
         el('span', { class: 'v mono' }, navigator.userAgent.match(/Node\.js\/[\d.]+/)?.[0] || '未知'),
         el('span', { class: 'k' }, '工具数'),
@@ -1362,7 +1432,7 @@ function viewAbout() {
       el(
         'div',
         {},
-        '本软件与 Apipost 官方无隶属关系。它只按官方 MCP 工具语义读写你本机 Apipost 单机版的项目数据，改动直接写入官方目录。'
+        '本软件是独立工具，数据全部保存在自己的数据目录里，不会读写 Apipost 单机版的任何文件。接口数据结构参考 Apipost 的公开格式，仅此而已。'
       )
     )
   );
@@ -1426,6 +1496,7 @@ function renderTopbarEnvs() {
         }
         render();
         if (state.view === 'envvars') await window.ApiEnvvars.reload();
+        if (state.view === 'transfer' && window.ApiTransfer) await window.ApiTransfer.reload();
       }
     },
     ...state.projects.map((p) =>
@@ -1474,6 +1545,7 @@ function render() {
   window.__consoleState = state;
   window.__consoleToast = toast;
   window.__consoleApi = api;
+  window.__consoleRender = render;
   window.__consoleCopy = copyText;
   window.__consoleCopyFailed = toastCopyFailed;
   window.__consoleCloseModal = closeModal;
@@ -1510,6 +1582,9 @@ function render() {
       break;
     case 'envvars':
       viewNode = window.ApiEnvvars ? window.ApiEnvvars.view() : el('div', { class: 'empty' }, '环境与变量加载失败');
+      break;
+    case 'transfer':
+      viewNode = window.ApiTransfer ? window.ApiTransfer.view() : el('div', { class: 'empty' }, '导入导出加载失败');
       break;
     case 'detail':
       viewNode = viewProjectDetail();

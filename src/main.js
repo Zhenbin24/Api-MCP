@@ -5,9 +5,8 @@ import { loadConfig, saveConfig, resolveRoots, DEFAULT_PORT } from './server/con
 import { createServer } from './server/serve.js';
 import { ToolContext } from './mcp/tools.js';
 import { startStdioServer } from './mcp/stdio.js';
-import { isOfficialRoot, defaultOfficialRoot, ownRoot, configPath } from './store/paths.js';
-
-const VERSION = '1.0.0';
+import { ownRoot, configPath } from './store/paths.js';
+import { VERSION } from './version.js';
 
 function parseArgs(argv) {
   const out = { _: [] };
@@ -36,13 +35,13 @@ API MCP 服务 v${VERSION}
   apimcp.exe --stdio         作为 stdio MCP 服务运行（供 Cursor / Claude Code 等直接拉起）
   apimcp.exe --serve         仅启动 HTTP 服务（不自动开浏览器）
   apimcp.exe --no-open       不自动开浏览器（其余行为同无参数）
-  apimcp.exe --data-root <dir>   指定 API 单机版数据目录
+  apimcp.exe --data-root <dir>   指定数据目录（默认 %APPDATA%\\ApiMCP\\data）
   apimcp.exe --port <n>      指定监听端口（默认 ${DEFAULT_PORT}）
   apimcp.exe --version       显示版本
   apimcp.exe --help          显示帮助
 
 环境变量:
-  APIPOST_DATA_ROOT   等同 --data-root
+  APIMCP_DATA_ROOT    等同 --data-root
   APIMCP_HOME         本软件配置目录（默认 %APPDATA%\\ApiMCP）
   APIMCP_CONFIG       配置文件路径
 `.trim();
@@ -77,7 +76,7 @@ async function main() {
     saveConfig(config);
   }
 
-  const { officialRoot } = resolveRoots(config, { dataRoot: args.dataRoot });
+  const { dataRoot, created } = resolveRoots(config, { dataRoot: args.dataRoot });
 
   // ---- stdio 模式 ----
   if (args.stdio) {
@@ -88,20 +87,15 @@ async function main() {
       console.error('[apimcp] 请在控制台「总览」中开启服务后重试。');
       process.exit(2);
     }
-    const ctx = new ToolContext({ officialRoot, config });
+    const ctx = new ToolContext({ dataRoot, config });
     startStdioServer(ctx);
     return;
   }
 
   // ---- HTTP 模式 ----
-  if (!isOfficialRoot(officialRoot)) {
-    console.error(`[apimcp] 警告：未在 ${officialRoot} 找到 API 单机版数据。`);
-    console.error(`[apimcp] 请先安装并打开 API 单机版，或用 --data-root 指定目录。`);
-  }
-
   const instance = createServer({
     config,
-    officialRoot,
+    dataRoot,
     log: (msg) => console.log(msg)
   });
 
@@ -125,7 +119,7 @@ async function main() {
   const uiUrl = `http://127.0.0.1:${actualPort}/?ui=${config.ui_token}`;
   console.log('');
   console.log('  API MCP 服务已启动');
-  console.log(`  数据目录: ${officialRoot}`);
+  console.log(`  数据目录: ${dataRoot}${created ? '（首次已初始化）' : ''}`);
   console.log(`  控制台  : ${uiUrl}`);
   console.log(`  MCP 端点: http://127.0.0.1:${actualPort}/mcp`);
   console.log(`  Token   : ${config.token}`);
