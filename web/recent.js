@@ -1,4 +1,14 @@
-/* 最近：最近保存 / 历史发送记录 */
+/* 最近：最近保存 / 历史发送记录（挂在 window.RecentView 上，由 app.js 调用） */
+
+/* 包进 IIFE：避免顶层函数泄漏到全局与其它页面脚本撞名 */
+(() => {
+'use strict';
+
+const api = {
+  get: (p, o) => window.__consoleApi.get(p, o),
+  post: (p, b, o) => window.__consoleApi.post(p, b, o)
+};
+const showModal = (...args) => window.__consoleShowModal?.(...args);
 
 const recent = {
   projectId: null,
@@ -496,3 +506,5 @@ window.RecentView = {
     renderRecentList();
   }
 };
+
+})();

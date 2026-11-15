@@ -70,6 +70,8 @@ export function saveRun(target, run) {
     ...run,
     steps: (run.steps || []).map((s) => ({
       step_id: s.step_id,
+      type: s.type,
+      path: s.path,
       target_id: s.target_id,
       name: s.name,
       method: s.method,
@@ -88,8 +90,11 @@ export function saveRun(target, run) {
       assertions: s.assertions,
       console: s.console,
       variables: s.variables,
+      script: s.script,
       error: s.error
-    }))
+    })),
+    // 控制器执行报告：与计划节点树同构，供报告页还原层级
+    tree: Array.isArray(run.tree) ? run.tree : []
   };
 
   const index = readRunsIndex(target);

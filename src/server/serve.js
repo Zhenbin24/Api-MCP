@@ -19,6 +19,7 @@ import {
   writeApiFile,
   deleteApis,
   findApiItem,
+  listApiItems,
   readApiIndex,
   writeApiIndex,
   updateApiIndexItem,
@@ -163,9 +164,7 @@ export function createServer({ config, dataRoot, log = () => {} }) {
     if (token === config.ui_token || queryToken === config.ui_token) return true;
     sendJson(res, 401, { error: 'UI token 无效。请使用启动时打印的地址打开控制台。' });
     return false;
-  };
-
-  const requireMcp = (req, res) => {
+  };  const requireMcp = (req, res) => {
     if (!config.enabled) {
       sendJson(res, 503, { error: 'MCP 服务未启用' });
       return false;
@@ -238,7 +237,7 @@ export function createServer({ config, dataRoot, log = () => {} }) {
       res.end(readWebAsset('index.html'));
       return;
     }
-    if (req.method === 'GET' && /^\/(app|design|envvars|extra|recent|transfer|curl-parse|curl-build|theme|style)\.(js|css)$/.test(pathname)) {
+    if (req.method === 'GET' && /^\/(app|design|envvars|extra|recent|automation|transfer|curl-parse|curl-build|codegen|theme|style)\.(js|css)$/.test(pathname)) {
       const name = pathname.slice(1);
       try {
         const content = readWebAsset(name);
@@ -260,6 +259,34 @@ export function createServer({ config, dataRoot, log = () => {} }) {
       } catch {
         res.writeHead(204);
         res.end();
+        return;
+      }
+    }
+
+    // ---- 只读文档页：在浏览器里查看 / 打印为 PDF ----
+    if (req.method === 'GET' && (pathname === '/doc' || pathname === '/doc/')) {
+      if (!requireUi(req, res)) return;
+      const url = new URL(req.url, 'http://127.0.0.1');
+      const projectId = url.searchParams.get('project') || '';
+      if (!projectId) {
+        sendText(res, 400, '缺少 project 参数，例如 /doc?project=<项目ID>&ui=<token>');
+        return;
+      }
+      try {
+        const { listProjects } = await import('../store/projects.js');
+        const meta = listProjects(dataRoot).find((p) => String(p.project_id) === String(projectId));
+        if (!meta) {
+          sendText(res, 404, `项目不存在：${projectId}`);
+          return;
+        }
+        const target = openProject({ dataRoot, projectId });
+        const { projectToHtml } = await import('../io/export.js');
+        const doc = projectToHtml(target, { projectId, projectName: meta.name });
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(doc.content);
+        return;
+      } catch (err) {
+        sendText(res, 500, `生成文档失败：${err?.message || String(err)}`);
         return;
       }
     }
@@ -296,6 +323,97 @@ export function createServer({ config, dataRoot, log = () => {} }) {
 
     if (api === 'config' && req.method === 'GET') {
       return sendJson(res, 200, publicConfig(config));
+    }
+
+    // AI 配置写入：api_key 传 undefined 不改、空串清空、其它值替换
+    if (api === 'config/ai' && req.method === 'PUT') {
+      const body = (await readBody(req)) || {};
+      try {
+        const { updateAiConfig } = await import('./config.js');
+        const patch = {};
+        for (const key of ['enabled', 'base_url', 'model', 'timeout_ms', 'api_key']) {
+          if (key in body) patch[key] = body[key];
+        }
+        const saved = updateAiConfig(config, patch);
+        ctx.config = saved;
+        return sendJson(res, 200, publicConfig(saved));
+      } catch (err) {
+        return sendJson(res, 400, { error: err?.message || String(err) });
+      }
+    }
+
+    // AI 连通性自检：发一条最小请求，验证 key / base_url / model 是否可用
+    if (api === 'ai/ping' && req.method === 'POST') {
+      try {
+        const { chatJson, AiError } = await import('./ai.js');
+        const result = await chatJson(config, [
+          { role: 'system', content: '你只需要回复 JSON。' },
+          { role: 'user', content: '返回 {"ok": true}' }
+        ]);
+        return sendJson(res, 200, { ok: true, echoed: result });
+      } catch (err) {
+        const status = err instanceof Error && err.status ? err.status : 400;
+        return sendJson(res, status, { ok: false, error: err?.message || String(err) });
+      }
+    }
+
+    // AI 解析导入：任意文本 / 请求代码 -> 接口定义（不落库，前端走现有导入流程）
+    if (api === 'ai/parse-import' && req.method === 'POST') {
+      const body = (await readBody(req)) || {};
+      try {
+        const { parseImportWithAi } = await import('./ai.js');
+        const result = await parseImportWithAi(config, { text: body.text, hint: body.hint });
+        return sendJson(res, 200, { ok: true, ...result });
+      } catch (err) {
+        const status = err?.status || 400;
+        return sendJson(res, status, { error: err?.message || String(err) });
+      }
+    }
+
+    // AI 起草接口：一句需求 -> 可填进编辑器的接口定义（不落库）
+    if (api === 'ai/draft-api' && req.method === 'POST') {
+      const body = (await readBody(req)) || {};
+      const projectId = String(body.project_id || '');
+      if (!projectId) return sendJson(res, 400, { error: '缺少 project_id' });
+      try {
+        const target = openProject({ dataRoot, projectId });
+        const items = listApiItems(target);
+        const { draftApiWithAi } = await import('./ai.js');
+        const meta = listProjects(dataRoot).find((p) => String(p.project_id) === projectId);
+        const draft = await draftApiWithAi(config, {
+          description: body.description,
+          projectName: meta?.name || '',
+          existingNames: items.filter((i) => i.target_type === 'api').map((i) => i.name || '')
+        });
+        return sendJson(res, 200, { ok: true, draft });
+      } catch (err) {
+        const status = err?.status || 400;
+        return sendJson(res, status, { error: err?.message || String(err) });
+      }
+    }
+
+    // AI 生成测试用例：只返回草稿，落库仍由现有 cases 接口完成
+    if (api === 'ai/gen-cases' && req.method === 'POST') {
+      const body = (await readBody(req)) || {};
+      const projectId = String(body.project_id || '');
+      const targetIdValue = String(body.target_id || '');
+      if (!projectId || !targetIdValue) return sendJson(res, 400, { error: '缺少 project_id 或 target_id' });
+      try {
+        const target = openProject({ dataRoot, projectId });
+        const item = findApiItem(target, targetIdValue);
+        if (!item) return sendJson(res, 404, { error: `接口不存在：${targetIdValue}` });
+        const file = ensureApiFile(target, targetIdValue);
+        const { generateCasesWithAi } = await import('./ai.js');
+        const result = await generateCasesWithAi(config, {
+          apiDetail: file?.data || {},
+          apiName: item.name,
+          count: body.count
+        });
+        return sendJson(res, 200, { ok: true, ...result });
+      } catch (err) {
+        const status = err?.status || 400;
+        return sendJson(res, status, { error: err?.message || String(err) });
+      }
     }
 
     if (api === 'config' && req.method === 'PUT') {
@@ -418,6 +536,87 @@ export function createServer({ config, dataRoot, log = () => {} }) {
       if (action === 'flows' && req.method === 'GET') {
         const target = openProject({ dataRoot, projectId });
         return sendJson(res, 200, { project_id: projectId, flows: listFlows(target) });
+      }
+
+      // ---------- 执行计划 CRUD（Web 控制台用） ----------
+      if (action === 'flows' && req.method === 'POST') {
+        const target = openProject({ dataRoot, projectId });
+        const body = (await readBody(req)) || {};
+        const { createFlow } = await import('../store/flows.js');
+        try {
+          const flow = createFlow(target, {
+            name: body.name,
+            description: body.description,
+            environmentId: body.environment_id,
+            steps: body.steps,
+            source: 'console'
+          });
+          return sendJson(res, 200, { ok: true, flow });
+        } catch (err) {
+          return sendJson(res, 400, { error: err?.message || String(err) });
+        }
+      }
+
+      const flowMatch = action.match(/^flows\/([^/]+)(\/run)?$/);
+      if (flowMatch) {
+        const targetIdValue = flowMatch[1];
+        const isRun = Boolean(flowMatch[2]);
+        const target = openProject({ dataRoot, projectId });
+        const { getFlow, updateFlow, deleteFlow, assertFlow } = await import('../store/flows.js');
+
+        // 运行计划：同步执行并返回摘要 + 报告树
+        if (isRun && req.method === 'POST') {
+          const body = (await readBody(req)) || {};
+          const { runFlow } = await import('../exec/runner.js');
+          try {
+            const summary = await runFlow({
+              dataRoot,
+              projectId,
+              flowId: targetIdValue,
+              envId: body.environment_id || assertFlow(target, targetIdValue).environment_id,
+              preferredEnvId: config.preferred_env?.[projectId],
+              source: 'console'
+            });
+            return sendJson(res, 200, summary);
+          } catch (err) {
+            return sendJson(res, 400, { error: err?.message || String(err) });
+          }
+        }
+
+        if (req.method === 'GET') {
+          const flow = getFlow(target, targetIdValue);
+          if (!flow) return sendJson(res, 404, { error: `执行计划不存在：${targetIdValue}` });
+          return sendJson(res, 200, { project_id: projectId, flow });
+        }
+
+        if (req.method === 'PUT') {
+          const body = (await readBody(req)) || {};
+          try {
+            const flow = updateFlow(target, targetIdValue, {
+              name: body.name,
+              description: body.description,
+              environmentId: body.environment_id,
+              steps: body.steps,
+              stop_on_fail: body.stop_on_fail
+            });
+            return sendJson(res, 200, { ok: true, flow });
+          } catch (err) {
+            return sendJson(res, 400, { error: err?.message || String(err) });
+          }
+        }
+
+        if (req.method === 'DELETE') {
+          try {
+            const result = deleteFlow(target, targetIdValue);
+            return sendJson(res, 200, { ok: true, ...result });
+          } catch (err) {
+            return sendJson(res, 400, { error: err?.message || String(err) });
+          }
+        }
+      }
+
+      if (action === 'flows/run' && req.method === 'POST') {
+        return sendJson(res, 400, { error: '请使用 POST /flows/:flow_id/run' });
       }
 
       if (action === 'runs' && req.method === 'GET') {
@@ -1103,9 +1302,26 @@ export function createServer({ config, dataRoot, log = () => {} }) {
       // ---------- 导入 / 导出 ----------
       if (action === 'import' && req.method === 'POST') {
         const body = (await readBody(req)) || {};
-        if (!body.payload) return sendJson(res, 400, { error: '缺少 payload：请上传文件或粘贴内容' });
+        // 两条入口：
+        // - items：已解析好的接口数组（AI 解析导入走这条）
+        // - payload：原始文档，由服务端解析（OpenAPI / Postman / HAR / cURL）
+        if (!body.payload && !Array.isArray(body.items)) {
+          return sendJson(res, 400, { error: '缺少 payload：请上传文件、粘贴内容，或传入 items' });
+        }
         try {
           const target = projectTarget();
+
+          if (Array.isArray(body.items)) {
+            const { applyImportItems, normalizeCoverMode } = await import('../io/apply.js');
+            const summary = applyImportItems(target, {
+              projectId,
+              items: body.items,
+              folderId: body.folder_id || '0',
+              coverMode: normalizeCoverMode(body.api_cover_mode || 'url_and_folder')
+            });
+            return sendJson(res, 200, { ok: true, format: 'items', summary });
+          }
+
           const result = importIntoProject(target, {
             projectId,
             format: body.format || 'auto',

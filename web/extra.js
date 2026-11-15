@@ -1,5 +1,9 @@
 /* 接口用例 / 一键压测 / Mock 三个面板（挂在 window.ApiExtra 上，由 design.js 调用） */
 
+/* 包进 IIFE：避免顶层函数泄漏到全局与其它页面脚本撞名 */
+(() => {
+'use strict';
+
 const X_MODES = {};
 
 function xh(tag, attrs = {}, ...children) {
@@ -130,6 +134,15 @@ function casesPanel() {
         }
       },
       '+ 新建用例'
+    ),
+    xh(
+      'button',
+      {
+        class: 'small mt8',
+        title: '用 AI 根据接口定义生成一组测试用例（生成后需保存才落库）',
+        onclick: () => generateCasesByAi()
+      },
+      '✦ AI 生成用例'
     )
   );
 
@@ -143,9 +156,123 @@ function casesPanel() {
   );
 }
 
-/** 保存当前用例（面板内按钮与 Ctrl+S 共用） */
-async function saveActiveCase() {
+/**
+ * AI 生成用例：先弹窗预览，用户确认后才批量落库。
+ * 生成结果只进内存草稿，未点「保存」前不写盘。
+ */
+async function generateCasesByAi() {
   const st = xstate();
+  if (!st?.projectId || !st?.selectedId) {
+    xtoast('请先选择一个接口', true);
+    return;
+  }
+
+  const countInput = xh('input', { type: 'number', min: 1, max: 10, value: 4, style: 'width:80px' });
+  const listHost = xh('div', { class: 'case-ai-preview' });
+  let generated = [];
+  let warnings = [];
+
+  const renderPreview = () => {
+    if (generated.length === 0) {
+      listHost.replaceChildren(xh('div', { class: 'empty' }, '点「生成」让 AI 设计用例'));
+      return;
+    }
+    listHost.replaceChildren(
+      ...generated.map((c) =>
+        xh(
+          'div',
+          { class: 'case-ai-item' },
+          xh('span', { class: 'tag info' }, c.expect?.code || '200'),
+          xh('span', { class: 'case-ai-name' }, c.name),
+          xh('span', { class: 'hint' }, JSON.stringify(c.input || {}).slice(0, 90))
+        )
+      ),
+      warnings.length > 0
+        ? xh('div', { class: 'form-hint' }, `提示：${warnings.join('；')}`)
+        : null
+    );
+  };
+
+  const generateBtn = xh('button', {
+    class: 'primary',
+    onclick: async () => {
+      generateBtn.disabled = true;
+      generateBtn.textContent = '生成中…';
+      try {
+        const res = await xapi().post('/ai/gen-cases', {
+          project_id: st.projectId,
+          target_id: st.selectedId,
+          count: Number(countInput.value) || 4
+        });
+        generated = res.cases || [];
+        warnings = res.warnings || [];
+        renderPreview();
+      } catch (err) {
+        xtoast(err.message, true);
+        listHost.replaceChildren(xh('div', { class: 'debug-error' }, err.message));
+      } finally {
+        generateBtn.disabled = false;
+        generateBtn.textContent = '重新生成';
+      }
+    }
+  }, '生成');
+
+  const body = xh(
+    'div',
+    { class: 'case-ai-body' },
+    xh('div', { class: 'row-gap' },
+      xh('label', { class: 'hint' }, '生成数量'),
+      countInput,
+      generateBtn
+    ),
+    xh('div', { class: 'form-hint' }, 'AI 会基于接口的参数与响应示例设计正常/异常用例；生成后可逐条修改，点「加入用例列表」才写入。'),
+    listHost
+  );
+
+  renderPreview();
+
+  window.__consoleShowModal?.('AI 生成用例', body, [
+    xh('button', { onclick: () => window.__consoleCloseModal?.() }, '取消'),
+    xh(
+      'button',
+      {
+        class: 'primary',
+        onclick: async () => {
+          if (generated.length === 0) {
+            xtoast('还没有生成任何用例', true);
+            return;
+          }
+          window.__consoleCloseModal?.();
+          // 逐条落库：沿用现有 cases 接口，避免新增一条写入路径
+          let saved = 0;
+          for (const c of generated) {
+            try {
+              const res = await xapi().post(`/projects/${st.projectId}/apis/${st.selectedId}/cases`, {
+                name: c.name,
+                input: c.input,
+                expect: c.expect,
+                expect_headers: c.expect_headers,
+                enabled: c.enabled
+              });
+              if (res?.case) saved += 1;
+            } catch (err) {
+              xtoast(`「${c.name}」保存失败：${err.message}`, true);
+            }
+          }
+          if (saved > 0) {
+            xtoast(`已加入 ${saved} 条用例`);
+            casesState.loadedFor = null;
+            window.__designRerender?.();
+          }
+        }
+      },
+      '加入用例列表'
+    )
+  ]);
+}
+
+/** 保存当前用例（面板内按钮与 Ctrl+S 共用） */
+async function saveActiveCase() {  const st = xstate();
   const index = casesState.activeIndex;
   const current = casesState.cases[index];
   if (!st?.selectedId || !current) {
@@ -1378,3 +1505,5 @@ window.ApiExtra = {
   },
   resetStress
 };
+
+})();

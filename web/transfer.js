@@ -1,6 +1,11 @@
 /* 导入导出：把外部接口文档导入项目，或把项目导出成 OpenAPI / Postman。
  * 挂在 window.ApiTransfer 上，由 app.js 的侧栏「导入导出」调用。 */
 
+/* 包进 IIFE：这里的 loadTree / renderAll 曾以全局函数覆盖 design.js 与 envvars.js 的同名实现，
+ * 导致「接口设计」侧栏永远为空、「环境与变量」页卡在加载中。 */
+(() => {
+'use strict';
+
 const tr = {
   projectId: null,
   /* 导入表单 */
@@ -26,7 +31,8 @@ const IMPORT_FORMATS = [
   ['swagger', 'Swagger 2.0'],
   ['postman', 'Postman Collection v2.1'],
   ['har', 'HAR'],
-  ['curl', 'cURL']
+  ['curl', 'cURL'],
+  ['ai', 'AI 解析（任意文本 / 请求代码）']
 ];
 
 const COVER_MODES = [
@@ -40,7 +46,10 @@ const COVER_MODES = [
 const EXPORT_FORMATS = [
   ['openapi', 'OpenAPI 3.0 (JSON)'],
   ['openapi_yaml', 'OpenAPI 3.0 (YAML)'],
-  ['postman', 'Postman Collection v2.1']
+  ['postman', 'Postman Collection v2.1'],
+  ['markdown', 'Markdown 文档'],
+  ['html', 'HTML 文档（可打印为 PDF）'],
+  ['word', 'Word 文档 (.doc)']
 ];
 
 /* ---------------- 基础工具 ---------------- */
@@ -192,7 +201,10 @@ function importPane() {
   const textarea = trEl('textarea', {
     class: 'tr-textarea',
     rows: 12,
-    placeholder: '把 cURL 命令、OpenAPI / Swagger 的 JSON 或 YAML、Postman Collection、HAR 文件内容粘贴到这里……',
+    placeholder:
+      tr.importFormat === 'ai'
+        ? '把任意内容粘贴到这里：自然语言接口描述、Java / Go / .NET / Python 请求代码、网页上复制的接口文档片段……AI 会从中提取出可调试的接口。'
+        : '把 cURL 命令、OpenAPI / Swagger 的 JSON 或 YAML、Postman Collection、HAR 文件内容粘贴到这里……',
     spellcheck: 'false',
     oninput: (e) => {
       tr.importPayload = e.target.value;
@@ -394,6 +406,22 @@ function exportPane() {
     '复制到剪贴板'
   );
 
+  // 只读文档页：新窗口打开，浏览器里可直接「打印为 PDF」
+  const docLink = trEl(
+    'button',
+    {
+      class: 'small',
+      disabled: noProject,
+      title: noProject ? '请先在「总览」页新建项目' : '在浏览器中打开只读文档页',
+      onclick: () => {
+        const token = new URLSearchParams(location.search).get('ui') || '';
+        const url = `/doc?project=${encodeURIComponent(projectId)}&ui=${encodeURIComponent(token)}`;
+        window.open(url, '_blank', 'noopener');
+      }
+    },
+    '打开文档页'
+  );
+
   return trEl(
     'div',
     { class: 'card' },
@@ -410,10 +438,11 @@ function exportPane() {
       { class: 'tr-grid' },
       trEl('div', { class: 'tr-field' }, trEl('span', { class: 'tr-label' }, '格式'), formatSelect)
     ),
-    trEl('div', { class: 'tr-actions' }, downloadBtn, copyBtn),
+    trEl('div', { class: 'tr-actions' }, downloadBtn, copyBtn, docLink),
     trDoc('导出说明', [
-      '只导出 HTTP 接口；目录层级会转成 OpenAPI 的 tags 或 Postman 的嵌套目录，导入回去能还原结构。',
+      'OpenAPI / Postman / Markdown / HTML / Word 六种格式；目录层级会转成 OpenAPI 的 tags 或 Postman 的嵌套目录，导入回去能还原结构。',
       'OpenAPI 里的 servers[0] 取当前环境的默认服务地址（server_id=1），导出后可以换环境再导一次拿到不同 baseURL 的版本。',
+      ['Markdown 适合放进代码仓库；HTML 自包含、离线可开，用浏览器打印即可存成 PDF；Word 导出为 .doc，Word / WPS 可直接打开。', 'HTML 与 Word 里包含同样的接口说明、参数表、Body 与响应示例。'],
       ['接口鉴权（Bearer / Basic / API Key / OAuth2）、Body（JSON / urlencoded / form-data）、响应示例都会带出去。', '文档、执行计划、执行历史不在导出范围内。']
     ])
   );
@@ -432,12 +461,24 @@ async function doPreview() {
   tr.importError = null;
   renderAll();
   try {
-    const res = await trApi().post('/import/preview', {
-      format: tr.importFormat,
-      payload,
-      base_path: tr.importBasePath
-    });
-    tr.importPreview = res;
+    if (tr.importFormat === 'ai') {
+      // AI 解析：把内容发给模型抽接口，拿到与 cURL 导入一致的 item 形状，
+      // 之后的预览 / 落库完全复用现有流程
+      const res = await trApi().post('/ai/parse-import', { text: payload });
+      tr.importPreview = {
+        format: 'ai',
+        format_label: 'AI 解析',
+        items: res.items,
+        warnings: res.warnings || []
+      };
+    } else {
+      const res = await trApi().post('/import/preview', {
+        format: tr.importFormat,
+        payload,
+        base_path: tr.importBasePath
+      });
+      tr.importPreview = res;
+    }
   } catch (err) {
     tr.importPreview = null;
     tr.importError = err.message;
@@ -453,26 +494,42 @@ async function doImport() {
     trToast('请先在「总览」页新建项目', true);
     return;
   }
+  const isAi = tr.importFormat === 'ai';
   const payload = tr.importPayload.trim();
-  if (!payload) {
+  // AI 模式下内容可以留空（预览已在模型侧完成），但必须有解析结果
+  if (!isAi && !payload) {
     tr.importError = '请先粘贴内容或选择文件';
     renderAll();
     return;
   }
-  const count = tr.importPreview?.api_count ?? 0;
+  if (isAi && !tr.importPreview?.items?.length) {
+    trToast('请先点「解析预览」，确认 AI 识别结果后再导入', true);
+    return;
+  }
+
+  const count = isAi ? tr.importPreview.items.length : tr.importPreview?.api_count ?? 0;
   if (count > 0 && !confirm(`即将导入 ${count} 个接口到「${trProjectName(projectId)}」，继续？`)) return;
 
   tr.importBusy = true;
   tr.importError = null;
   renderAll();
   try {
-    const res = await trApi().post(`/projects/${projectId}/import`, {
-      format: tr.importFormat,
-      payload,
-      folder_id: tr.importFolderId,
-      api_cover_mode: tr.importCoverMode,
-      base_path: tr.importBasePath
-    });
+    const res = await trApi().post(`/projects/${projectId}/import`,
+      isAi
+        ? {
+            // AI 已解析成 items，直接走落库通道，与其它格式共用同一套覆盖策略
+            items: tr.importPreview.items,
+            folder_id: tr.importFolderId,
+            api_cover_mode: tr.importCoverMode
+          }
+        : {
+            format: tr.importFormat,
+            payload,
+            folder_id: tr.importFolderId,
+            api_cover_mode: tr.importCoverMode,
+            base_path: tr.importBasePath
+          }
+    );
     const s = res.summary || {};
     trToast(`导入完成：新建 ${s.created || 0}，更新 ${s.updated || 0}，跳过 ${s.skipped || 0}`);
     tr.importPreview = null;
@@ -567,3 +624,5 @@ window.ApiTransfer = {
     renderAll();
   }
 };
+
+})();

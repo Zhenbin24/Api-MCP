@@ -6,8 +6,12 @@ Windows 版本地 API 设计与调试工具，内置 MCP 服务。自带数据�
 
 - **34 个工具** — `apimcp_list_projects` … `apimcp_export_project`
 - **开箱即用** — 首次启动自动建好数据目录和一个「默认项目」，打开就能写接口
-- **导入导出** — 导入 OpenAPI 3.x / Swagger 2.0 / Postman Collection v2.1 / HAR / cURL；导出 OpenAPI 3.0（JSON 或 YAML）与 Postman v2.1
+- **导入导出** — 导入 OpenAPI 3.x / Swagger 2.0 / Postman Collection v2.1 / HAR / cURL，以及 AI 解析任意文本与请求代码；导出 OpenAPI 3.0（JSON / YAML）、Postman v2.1、Markdown、HTML、Word
 - **可视化接口编辑器** — 控制台内直接新建/编辑/删除接口、目录、文档，含参数表、Body、鉴权、前后置脚本、响应示例
+- **接口树交互对齐 Apipost** — 双击就地改名、右键菜单（打开 / 重命名 / 复制 / 删除 / 在此新建）、搜索过滤、目录折叠、拖拽排序与跨目录移动
+- **代码生成** — 一键把当前请求转成 cURL / fetch / axios / Python / Go / Java 六种可运行代码
+- **自动化测试** — 执行计划编排，支持条件 / 次数 / While / 等待 / 脚本五种控制器任意嵌套，运行后输出可视化报告
+- **AI 辅助（可选）** — 兼容 OpenAI 风格的任意服务：AI 解析导入、AI 起草接口、AI 生成测试用例
 - **环境管理** — 多环境切换、环境变量、多 host 服务（前置 URL）；目录可指定服务，其下接口优先使用
 - **全局参数与全局变量** — 全局 / 目录 / 接口三层继承（Header、Query、Body、鉴权、前后置脚本），环境变量优先于全局变量；Cookie 统一写在 Header 的 `Cookie` 键
 - **完整 apt 脚本沙箱** — `apt.environment/globals/variables`、`setRequestHeader/Query/Body`、`response.json/text`、`cookies`、`apt.test/apt.expect`
@@ -27,6 +31,23 @@ Windows 版本地 API 设计与调试工具，内置 MCP 服务。自带数据�
 | **命令行 / 浏览器版** | `dist/apimcp.exe` | 给 AI 客户端当 MCP 服务用，或习惯在浏览器里操作 |
 
 两者数据完全共享，用哪个都行，也可以同时用。
+
+## 功能地图
+
+| 我想… | 去哪 |
+|---|---|
+| 写接口、改参数、发请求 | 接口设计 → 设计 / 调试 |
+| 改接口名、删除、复制、拖到别的目录 | 接口设计左树：双击改名、右键菜单、拖拽 |
+| 把请求转成 Java / Go / Python 代码 | 接口设计 → 调试 → 生成代码 |
+| 把多个接口串成流程、加条件与循环 | 自动化测试 |
+| 把文档发给别人 | 导入导出 → 导出 Markdown / HTML / Word，或「打开文档页」打印成 PDF |
+| 导入别人给的接口文档 | 导入导出 → 粘贴内容或上传文件 |
+| 粘贴一段 Java 代码或网页文字变成接口 | 导入导出 → 格式选「AI 解析」（需先启用 AI） |
+| 一句话生成一个接口 | 接口设计工具条 →「✦ AI 起草接口」 |
+| 批量生成测试用例 | 接口设计 → 接口用例 →「✦ AI 生成用例」 |
+| 切换环境、改变量 | 环境与变量 |
+| 让 Cursor 等 AI 客户端调用这些接口 | 客户端配置 |
+| 打开或关闭 MCP 服务 | 总览
 
 ### 前置条件
 
@@ -195,7 +216,7 @@ apt.environment.set("token", apt.response.json().token);
 x-access-token: {{token}}
 ```
 
-### 从源码构建
+## 从源码构建
 
 ```powershell
 npm install
@@ -206,6 +227,123 @@ npm run build:desktop  # → dist/desktop/ApiMCP-Desktop-win32-x64/ + 同名 zip
 > `build:desktop` 会把 `dist/apimcp.exe` 一起拷进桌面端目录并打成 zip，所以先跑 `build` 再跑 `build:desktop`。产物大小约：`apimcp.exe` 89 MB、桌面端 zip 184 MB。
 
 改完 `web/` 下的任何文件后必须重跑 `npm run build`（或 `node scripts/gen-assets.mjs`），因为控制台资源是内联进 exe 的。
+
+新增前端脚本要同步改三处：`web/index.html` 的 script 标签、`scripts/gen-assets.mjs` 的 `files` 数组、`src/server/serve.js` 里静态资源路由的正则。
+
+## 接口树交互
+
+「接口设计」左侧的树按 Apipost 的方式操作：
+
+| 手势 | 行为 |
+|---|---|
+| 单击 | 打开该接口 / 目录 / 文档 |
+| **双击名称** | 就地改名，回车或失焦立即落库，Esc 取消 |
+| **右键** | 弹出菜单：打开、重命名、复制、删除；目录额外提供「在此新建接口 / 目录 / 文档」 |
+| 拖拽 | 拖到目录行中间 = 移入该目录；拖到行的上 / 下缘 = 同级插入前后；禁止把目录拖进自己的子树 |
+| 点折叠箭头 | 收起 / 展开该目录（重绘后保持） |
+
+顶部搜索框按名称、URL、方法或 ID 过滤，命中的节点会连同祖先链一起保留；没有命中时显示「没有匹配的接口」。
+
+「复制」是在同目录生成一份「xxx 副本」，参数、Body、鉴权、脚本、用例与 Mock 一并复制（目录只复制自身，不含子项），不经过剪贴板。
+
+元信息栏的字段顺序是：**接口名称 → 状态 → 目录 → 标签**。改「接口名称」时侧栏标题实时跟随，与「基础 → 名称」三处始终一致。
+
+## 代码生成
+
+调试页签的响应区有「生成代码」按钮，把本次实际发出的请求转成六种可运行代码：
+
+| 语言 | 产出 |
+|---|---|
+| cURL | bash 方言，与「复制为 cURL」保持一致 |
+| JavaScript | `fetch` / `axios` 两种写法 |
+| Python | `requests` |
+| Go | `net/http` |
+| Java | `OkHttp` |
+
+请求里的 `{{变量}}` 会原样保留，不会解析成实际值——粘到代码里后由你自己决定怎么注入。`form-data` 与 `binary` 这类无法用文本还原的模式会给出 warning，而不是编造一份假数据。上次选的语言会记住。
+
+## 自动化测试
+
+控制台左侧「自动化测试」把多个接口串成一条业务流程，支持控制器嵌套，运行后看可视化报告。
+
+### 节点类型
+
+| 类型 | 说明 |
+|---|---|
+| 接口步骤 | 引用项目里的 HTTP 接口，保存时固化一份快照，之后改接口不影响已排好的步骤 |
+| 条件控制器 | 填 JS 表达式，为真走「成立时」分支，否则走「否则」分支 |
+| 次数控制器 | 按指定次数重复执行子节点，循环体内可用 `{{$index}}`（从 0 起）/ `{{$iteration}}`（从 1 起） |
+| While 控制器 | 每轮开始前求值，为真继续循环；`max_iterations` 兜底防死循环，达到上限会强制退出并在报告里提示 |
+| 等待控制器 | 延迟指定毫秒 |
+| 脚本控制器 | 只跑脚本不发请求，断言照常收集 |
+
+### 条件怎么写
+
+条件是一个 JS 表达式，可用对象与脚本沙箱完全一致：
+
+```js
+apt.response.code() === 200
+apt.response.json().code === 0
+apt.variables.get("token") !== ""
+apt.response.json().data.length > 0
+```
+
+### 跨步骤传值（自动化计划内）
+
+在步骤的后置脚本里写入变量，后续步骤用 `{{...}}` 引用：
+
+```js
+// 第 1 步（登录）的后置脚本
+apt.environment.set("token", apt.response.json().token);
+```
+
+```
+// 第 2 步的 Header
+x-access-token: {{token}}
+```
+
+### 失败策略
+
+默认「失败继续」——某步失败后仍执行后续步骤，便于一次看清整条链路哪里断了。勾选「失败即停」后，第一个失败会中止剩余步骤，被跳过的节点在报告里标记为「跳过」而不是静默丢弃。
+
+### 执行报告
+
+报告与计划结构同构：控制器按层级展开，循环能看到每一轮的子节点，条件会显示求值结果与走了哪个分支。每个节点给状态、耗时、状态码、断言明细与错误信息。
+
+### 兼容性
+
+历史计划里的步骤没有 `type` 字段，一律按普通接口步骤执行，**不需要迁移**，老计划可以直接跑。
+
+## AI 辅助（可选）
+
+默认关闭。到「外观设置 → AI 设置」填 API 地址、模型与 API Key 后启用。
+
+任何 OpenAI 风格的服务都能接：
+
+| 服务 | API 地址 | 模型示例 |
+|---|---|---|
+| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` |
+| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` |
+| 通义千问 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` |
+| 本地 Ollama | `http://127.0.0.1:11434/v1` | `qwen2.5` |
+
+填完可点「测试连通性」验证。
+
+### 三个能力
+
+| 入口 | 作用 |
+|---|---|
+| 导入导出 → 格式选「AI 解析」 | 粘贴任意内容（自然语言描述、Java / Go / .NET / Python 请求代码、网页复制的文档片段），提取成可调试的接口 |
+| 接口设计工具条 →「✦ AI 起草接口」 | 一句话描述需求，生成方法、URL、参数、Body 与响应示例 |
+| 接口用例面板 →「✦ AI 生成用例」 | 基于接口参数与响应示例设计正常 / 异常用例 |
+
+三者都是「先生成、预览、确认后才落库」，AI 产生的内容不会直接写进项目数据。
+
+### 安全说明
+
+- API Key 以**明文**保存在 `%APPDATA%\ApiMCP\config.json`，与本服务的 MCP token 同级保护。服务只监听 `127.0.0.1` 且所有 `/api/*` 都需要 `ui_token`，但请勿在共享机器上填写。
+- `publicConfig` 接口**只返回 `has_api_key` 布尔值**，Key 永远不会回传给前端，也不会出现在错误信息或日志里。
+- 启用后，相关请求内容会发送到你填写的那个第三方地址。
 
 ## 导入导出
 
@@ -220,6 +358,7 @@ npm run build:desktop  # → dist/desktop/ApiMCP-Desktop-win32-x64/ + 同名 zip
 | Postman Collection v2.0 / v2.1 | 嵌套目录还原成目录层级；`raw` / `urlencoded` / `formdata` / `graphql` body；`bearer` / `basic` / `apikey` / `oauth2` 鉴权 |
 | HAR 1.2 | `log.entries[]` 逐条转成接口；按 `mimeType` 决定 body 模式 |
 | cURL | bash（`\` 续行）、CMD（`^` 续行）、PowerShell（反引号 / `curl.exe`）三种方言；支持多条 curl 一起导入 |
+| AI 解析 | 任意文本 / 请求代码；需先启用 AI（见上文），结果先预览再落库 |
 
 流程是「先预览再落库」：预览只解析不写盘，会给出格式、接口数、目录数、前 50 条明细与 warnings（例如 Postman 里用到的变量尚未定义）。
 
@@ -242,10 +381,19 @@ npm run build:desktop  # → dist/desktop/ApiMCP-Desktop-win32-x64/ + 同名 zip
 | `openapi` | OpenAPI 3.0.3 JSON |
 | `openapi_yaml` | OpenAPI 3.0.3 YAML（同一份结构，便于阅读与版本管理） |
 | `postman` | Postman Collection v2.1 |
+| `markdown` | Markdown 文档，适合放进代码仓库 |
+| `html` | 自包含 HTML，离线可开，用浏览器打印即可存成 PDF |
+| `word` | Word 文档（`.doc`，Word / WPS 直接打开） |
 
-只导出 HTTP 接口；目录层级会转成 OpenAPI 的 `tags` 或 Postman 的嵌套目录，导回去能还原结构。`servers[0]` 取当前环境默认服务（`server_id=1`）的地址。
+OpenAPI / Postman 只导出 HTTP 接口；目录层级会转成 OpenAPI 的 `tags` 或 Postman 的嵌套目录，导回去能还原结构。`servers[0]` 取当前环境默认服务（`server_id=1`）的地址。
 
 导出的 OpenAPI 可以再被导入回同一项目，会命中原有接口（`updated` 而不是重复 `created`），往返一致性由 `test/io.test.mjs` 覆盖。
+
+### 文档导出与只读文档页
+
+三种文档格式（Markdown / HTML / Word）内容一致：按目录分组，每个接口给出方法、URL、状态、标签、说明、参数表（Header / Query / Path）、Body 与响应示例。空壳的默认响应示例会被跳过，不会塞一个假的 `{}` 进文档。
+
+导出页还有「打开文档页」按钮，打开 `http://127.0.0.1:<port>/doc?project=<项目ID>&ui=<token>`——一个只读、自包含的 HTML 页面，带打印样式，浏览器里直接「打印 → 另存为 PDF」就能交付给非开发的同事。因为这是本地单机服务，「分享」等于在本机打开或打印，不做公网托管。
 
 ## 命令行
 
@@ -261,6 +409,8 @@ npm run build:desktop  # → dist/desktop/ApiMCP-Desktop-win32-x64/ + 同名 zip
 | `--version` / `--help` | 版本 / 帮助 |
 
 环境变量：`APIMCP_DATA_ROOT`（等同 `--data-root`，旧名 `APIPOST_DATA_ROOT` 仍可用）、`APIMCP_HOME`、`APIMCP_CONFIG`
+
+AI 相关配置不在命令行里，统一在控制台「外观设置 → AI 设置」维护，写入 `config.json` 的 `ai` 字段。
 
 ## 常见问题
 
@@ -290,6 +440,21 @@ npm run build:desktop  # → dist/desktop/ApiMCP-Desktop-win32-x64/ + 同名 zip
 
 **配到 Cursor 后工具调不通**
 `mcp.json` 里的 `command` 必须是 exe 的**绝对路径**；改完要重启 Cursor。可先用控制台「客户端配置」页面复制，避免手写出错。
+
+**改了 `web/` 下的文件，但页面还是旧的**
+控制台资源是内联进 exe 的。开发时跑 `node src/main.js --serve` 会用最新文件；但如果用的是打包好的 exe，必须先 `npm run build`（或至少 `node scripts/gen-assets.mjs`）。
+
+**AI 功能点了没反应 / 提示未启用**
+到「外观设置 → AI 设置」勾选启用并填好 API 地址、模型与 API Key，再用「测试连通性」确认。地址要带版本路径，例如 `https://api.deepseek.com/v1`（不是 `.../chat/completions`，程序会自动拼）。
+
+**AI 报 401 / 429 / 超时**
+401 是 Key 不对或没有该模型权限；429 是限流或余额不足；超时可在配置里调大 `timeout_ms`（程序内限制 5s ~ 300s）。错误信息里不会出现你的 Key。
+
+**自动化计划里的步骤改了接口却没生效**
+执行计划的步骤保存时会固化一份接口快照，这是刻意设计——避免改接口把所有历史计划的预期结果打乱。要让步骤用最新定义，删掉该步骤重新添加即可。
+
+**循环控制器把程序跑死了**
+While 控制器有 `max_iterations` 上限（默认 100，最大 1000），达到上限会强制退出并在报告里提示。如果是次数控制器，`times` 上限同样是 1000。
 
 ## 桌面端（Electron 独立窗口）
 
@@ -344,16 +509,18 @@ src/
   main.js              CLI 入口（SEA 单文件版）
   version.js           版本号单一来源
   desktop/             桌面端（Electron 主进程 / preload / 服务附着 / 窗口状态）
-  store/               数据读写（paths/projects/apis/envs/flows/runs/recent/target）
+  store/               数据读写（paths/projects/apis/envs/flows/flows-nodes/runs/recent/target）
   exec/                执行引擎（http/auth/template/assert/script/runner）
   mcp/                 工具定义（schemas/tools）、协议（protocol）、stdio
   openapi/convert.js   OpenAPI 3.0/3.1 转换
-  server/              HTTP 服务、配置、客户端配置生成
-web/                   控制台（index.html / app.js / design.js / theme.css / style.css）
+  server/              HTTP 服务、配置、客户端配置生成、AI 客户端（ai.js）
+web/                   控制台（index.html / app.js / design.js / automation.js / codegen.js / theme.css / style.css）
 build/                 gen-icon.mjs 生成的 icon.ico（9 档多尺寸）/ icon.png
 test/                  node:test 测试
 scripts/               gen-assets.mjs / gen-icon.mjs / build.mjs / build-desktop.mjs
 ```
+
+`src/store/flow-nodes.js` 定义执行计划的节点模型（接口步骤 + 五种控制器）与规范化校验；`src/server/ai.js` 封装 OpenAI 兼容客户端与三个 AI 能力。
 
 ## 测试
 
@@ -361,9 +528,11 @@ scripts/               gen-assets.mjs / gen-icon.mjs / build.mjs / build-desktop
 npm test
 ```
 
-当前 212 项测试。
+当前 285 项测试。
 
-覆盖：数据根解析与首次初始化播种（含幂等与优先级）、模板变量优先级、鉴权构造、schema 校验、OpenAPI 转换、本地数据目录读写（含越界保护）、存储 CRUD、执行引擎（含脚本沙箱、跨步骤传值、步骤快照固化）、MCP 协议与 32 工具名一致性、HTTP 服务鉴权与新建项目接口、接口编辑器 CRUD（含级联删除与落盘验证）、桌面端服务附着（含数据目录同源校验）与窗口状态、五页签数据域隔离（`preserve_aux`）、调试详情（`live_detail`）、用例响应头 / Content-Type 校验、压测进度时间线、Mock 自定义响应头、图标 ICO 结构。
+覆盖：数据根解析与首次初始化播种（含幂等与优先级）、模板变量优先级、鉴权构造、schema 校验、OpenAPI 转换、本地数据目录读写（含越界保护）、存储 CRUD、执行引擎（含脚本沙箱、跨步骤传值、步骤快照固化）、MCP 协议与 34 工具名一致性、HTTP 服务鉴权与新建项目接口、接口编辑器 CRUD（含级联删除与落盘验证）、桌面端服务附着（含数据目录同源校验）与窗口状态、五页签数据域隔离（`preserve_aux`）、调试详情（`live_detail`）、用例响应头 / Content-Type 校验、压测进度时间线、Mock 自定义响应头、图标 ICO 结构。
+
+新增覆盖：代码生成六种语言的产出与转义、文档导出三种格式与空壳示例过滤、`/doc` 只读文档页鉴权、控制器节点模型与向后兼容、条件分支与 else 分支、次数循环、While 上限保护、等待与脚本控制器、`stop_on_fail` 中止、报告树与计划结构同构、AI 配置不泄漏 Key、OpenAI 兼容客户端（含 401 / 429 / 超时 / 非 JSON 响应）、三个 AI 端点在未配置时的明确报错。
 
 ## 控制台
 
@@ -372,17 +541,18 @@ npm test
 | 总览 | 服务状态、Token、数据目录、项目授权、新建项目、快速开始 |
 | 环境与变量 | 三个页签：环境（多环境 + 环境变量 + 多 host 服务）、全局参数（含目录参数继承）、全局变量；每个页签底部含可折叠的使用说明 |
 | 接口设计 | 接口树 + 六页签编辑器（基础 / 参数 / Body / 鉴权 / 脚本 / 响应），右侧另有设计 / 调试 / 接口用例 / 一键压测 / Mock 五个独立数据域；目录也有「基础 / 参数 / Body / 鉴权 / 脚本」五个子页签 |
-| 导入导出 | 导入 OpenAPI 3.x / Swagger 2.0 / Postman v2.1 / HAR / cURL（先预览再落库，可选目标目录与覆盖方式）；导出 OpenAPI 3.0（JSON / YAML）或 Postman v2.1 |
+| 自动化测试 | 执行计划列表 + 步骤树编排（接口步骤与五种控制器嵌套）+ 可视化执行报告 |
+| 导入导出 | 导入 OpenAPI 3.x / Swagger 2.0 / Postman v2.1 / HAR / cURL / AI 解析（先预览再落库，可选目标目录与覆盖方式）；导出 OpenAPI（JSON / YAML）/ Postman v2.1 / Markdown / HTML / Word，并可打开只读文档页 |
 | 客户端配置 | Cursor / Claude Code / VS Code / Trae / Codex 配置一键复制 |
 | 工具清单 | 34 个 MCP 工具说明 |
-| 外观设置 | 暖纸金 / 暗色 / 自定义底色 + 字号缩放 |
+| 外观设置 | 暖纸金 / 暗色 / 自定义底色 + 字号缩放 + 数据目录 + AI 设置 |
 | 关于 | 版本与路径信息 |
 
 「接口设计」的编辑直接写入本地数据目录，保存即时生效。
 
 设计 / 调试 / 接口用例 / 一键压测 / Mock 五个页签各自独立：设计保存只提交设计字段（不会覆盖用例与 Mock），用例与 Mock 页签各有自己的「未保存」标记与 Ctrl+S，压测与 Mock 页签的请求栏只读。
 
-「调试」页签展示实际发出的完整请求头、Query、请求体、状态行、响应头、逐条 `Set-Cookie` 与实际 URL，并支持「隐藏敏感值」开关与「复制为 cURL」。这些详情只在本机即时返回，落盘的执行历史仍按 `authorization / cookie / token` 等敏感键打码。
+「调试」页签展示实际发出的完整请求头、Query、请求体、状态行、响应头、逐条 `Set-Cookie` 与实际 URL，并支持「隐藏敏感值」开关、「复制为 cURL」与「生成代码」（六种语言）。这些详情只在本机即时返回，落盘的执行历史仍按 `authorization / cookie / token` 等敏感键打码。
 
 ## 工具清单
 
@@ -401,3 +571,7 @@ npm test
 - 鉴权支持 `noauth / basic / bearer / kv(apikey) / oauth2(静态 token) / inherit`；`awsv4 / digest / hawk / ntlm / oauth1 / edgegrid / asap / jwt` 会明确报错
 - 全局/目录参数的 Body 只支持 `form-data` 与 `urlencoded`；Header / Query / 鉴权 / 前后置脚本可继承；Cookie 由 Header 的 `Cookie` 键表达（界面不再提供 Cookie 参数表）
 - 全局参数与目录参数的执行顺序：前置脚本 `全局 → 目录 → 接口`，后置脚本 `接口 → 目录 → 全局`；同名参数内层优先，内层 `is_checked = -1` 表示禁用外层同名项
+- 代码生成覆盖 cURL / fetch / axios / Python / Go / Java 六种；`form-data` 与 `binary` 模式无法用文本还原，会给出 warning 而不是编造数据
+- Word 导出为 `.doc`（HTML 包装），不是 `.docx`；Word / WPS 可直接打开，但部分老版本会提示「格式与扩展名不一致」
+- 执行计划目前只由 Web 控制台与 MCP 工具操作；控制器条件使用 JS 表达式，暂不提供可视化条件构建器
+- AI 能力需要外网可访问的 OpenAI 兼容服务；本地模型（如 Ollama）也可用，但需自行启动

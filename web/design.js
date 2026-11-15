@@ -1,5 +1,25 @@
 /* 接口设计器：树 + 编辑器（挂在 window.ApiDesign 上，由 app.js 调用） */
 
+/* 包进 IIFE：避免顶层函数泄漏到全局，与其它页面脚本（transfer.js 的 loadTree 等）撞名 */
+(() => {
+'use strict';
+
+/* ---------------- 控制台桥接 ---------------- */
+// app.js 在脚本加载阶段就已 installConsoleBridge()，这里直接取。
+const toast = (message, isError) => window.__consoleToast?.(message, isError);
+const api = {
+  get: (p, o) => window.__consoleApi.get(p, o),
+  post: (p, b, o) => window.__consoleApi.post(p, b, o),
+  put: (p, b, o) => window.__consoleApi.put(p, b, o),
+  req: (m, p, b, o) => window.__consoleApi.req(m, p, b, o)
+};
+const showModal = (...args) => window.__consoleShowModal?.(...args);
+const closeModal = (...args) => window.__consoleCloseModal?.(...args);
+const copyText = (...args) => window.__consoleCopy?.(...args);
+const toastCopyFailed = (...args) => window.__consoleCopyFailed?.(...args);
+const refreshEnvironments = (...args) => window.__consoleRefreshEnvs?.(...args);
+const renderTopbarEnvs = (...args) => window.__consoleRenderTopbarEnvs?.(...args);
+
 const METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'];
 const BODY_MODES = [
   ['none', '无'],
@@ -231,6 +251,10 @@ const editor = {
   debugEncoding: 'utf-8',
   // 调试面板「隐藏敏感值」开关，默认关闭（本地调试优先看全）
   debugMask: false,
+  /** 左树关键词过滤（空串表示不过滤） */
+  treeKeyword: '',
+  /** 左树里被折叠起来的目录 target_id 集合 */
+  collapsed: new Set(),
   apiIndex: []
 };
 
@@ -695,6 +719,22 @@ function metaBar() {
     h(
       'div',
       { class: 'meta-row' },
+      // 接口名称放在最前面：对齐 Apipost，顶部一眼能看到当前在编辑哪个接口
+      h('label', { class: 'meta-label' }, '接口名称'),
+      h(
+        'div',
+        { class: 'meta-value meta-name' },
+        input(
+          d.name || '',
+          (v) => {
+            d.name = v;
+            markDirty();
+            // 侧栏标题实时跟随（只改文本，不重绘树，避免输入框失焦）
+            if (editor.selectedId) syncTreeName(editor.selectedId, v || '未命名');
+          },
+          { placeholder: '接口名称' }
+        )
+      ),
       h('label', { class: 'meta-label' }, '状态'),
       h('div', { class: 'meta-value' }, statusSelector()),
       h('label', { class: 'meta-label' }, '目录'),
@@ -2915,6 +2955,16 @@ function debugPanel() {
           onclick: () => copyAsCurl(liveReq)
         },
         '复制为 cURL'
+      ),
+      h(
+        'button',
+        {
+          class: 'small',
+          disabled: !liveReq,
+          title: '生成常见语言的调用代码',
+          onclick: () => openCodeSnippet(liveReq)
+        },
+        '生成代码'
       )
     ),
     h(
@@ -3021,6 +3071,87 @@ async function copyAsCurl(req) {
   }
   if (warnings.length > 0) toast(`已复制为 cURL（${warnings[0]}）`);
   else toast(`已复制为 cURL（${dialect === 'cmd' ? 'CMD' : 'Bash'}）`);
+}
+
+/* ---------------- 生成代码片段 ---------------- */
+
+/** 弹窗展示所选语言的调用代码，可一键复制 */
+function openCodeSnippet(req) {
+  const gen = window.CodeGen;
+  if (!gen) {
+    toast('代码生成器未加载，请刷新页面', true);
+    return;
+  }
+  if (!req) {
+    toast('没有可用的请求详情', true);
+    return;
+  }
+
+  // 记住上次选的语言，下次打开还是它
+  let lang = 'curl';
+  try {
+    const saved = localStorage.getItem('apipost_codegen_lang');
+    if (saved && gen.LANGUAGES.some(([k]) => k === saved)) lang = saved;
+  } catch {}
+
+  const codeHost = h('pre', { class: 'code-snippet' });
+  const warnHost = h('div', { class: 'form-hint' });
+  let current = '';
+
+  const render = () => {
+    let result;
+    try {
+      result = gen.buildSnippet(req, { lang });
+    } catch (err) {
+      result = { code: `// 生成失败：${err.message}`, warnings: [] };
+    }
+    current = result.code;
+    codeHost.textContent = result.code || '// 没有可生成的代码';
+    warnHost.textContent = (result.warnings || []).join(' · ');
+  };
+
+  const langSelect = h(
+    'select',
+    {
+      onchange: (e) => {
+        lang = e.target.value;
+        try {
+          localStorage.setItem('apipost_codegen_lang', lang);
+        } catch {}
+        render();
+      }
+    },
+    ...gen.LANGUAGES.map(([key, label]) =>
+      h('option', { value: key, ...(key === lang ? { selected: true } : {}) }, label)
+    )
+  );
+
+  render();
+
+  const body = h(
+    'div',
+    { class: 'codegen-body' },
+    h('div', { class: 'form-row' }, h('label', { class: 'form-label' }, '语言'), h('div', { class: 'form-control' }, langSelect)),
+    codeHost,
+    warnHost,
+    h('div', { class: 'form-hint' }, '请求里的 {{变量}} 会原样保留，不会被解析成实际值。')
+  );
+
+  showModal('生成代码', body, [
+    h('button', { onclick: closeModal }, '关闭'),
+    h(
+      'button',
+      {
+        class: 'primary',
+        onclick: async () => {
+          const res = await copyText(current);
+          if (res.ok) toast('已复制代码');
+          else toastCopyFailed(res.error);
+        }
+      },
+      '复制代码'
+    )
+  ]);
 }
 
 function tryParseJson(text) {
@@ -3741,7 +3872,7 @@ async function focusTarget(targetId, onRefresh) {
   if (onRefresh) onRefresh();
 }
 
-function openCreateDialog(type, onRefresh) {
+function openCreateDialog(type, onRefresh, { parentId } = {}) {
   const showModal = window.__consoleShowModal;
   const closeModal = window.__consoleCloseModal;
   if (!showModal) {
@@ -3760,10 +3891,12 @@ function openCreateDialog(type, onRefresh) {
 
   const state = {
     name: meta.defaultName,
-    parentId: (() => {
-      // 当前选中目录时默认建在其下
-      return editor.targetType === 'folder' && editor.selectedId ? editor.selectedId : '0';
-    })(),
+    parentId: parentId != null
+      ? String(parentId)
+      : (() => {
+          // 当前选中目录时默认建在其下
+          return editor.targetType === 'folder' && editor.selectedId ? editor.selectedId : '0';
+        })(),
     keyword: ''
   };
 
@@ -4095,6 +4228,16 @@ function editorToolbar(onRefresh) {
       },
       '+ 新建文档'
     ),
+    h(
+      'button',
+      {
+        class: 'small',
+        disabled: noProject,
+        title: noProject ? '请先在「总览」页新建项目' : '用一句话描述，让 AI 起草接口定义',
+        onclick: () => openAiDraftDialog(onRefresh)
+      },
+      '✦ AI 起草接口'
+    ),
     h('span', { class: 'spacer-flex' }),
     h('span', {
       id: 'dirty-badge',
@@ -4127,20 +4270,13 @@ function editorToolbar(onRefresh) {
         class: 'small danger',
         disabled: !hasSelection,
         onclick: async () => {
-          const label = isFolder ? '目录（含其下所有内容）' : '接口';
-          const removedName = editor.data?.name || editor.selectedId;
-          if (!confirm(`确定删除${label}「${removedName}」？`)) return;
-          try {
-            await api.req('DELETE', `/projects/${editor.projectId}/apis/${editor.selectedId}`);
-            editor.selectedId = null;
-            editor.data = null;
-            discardUnsaved();
-            await loadTree(editor.projectId);
-            notifyAction('delete', removedName);
-            onRefresh();
-          } catch (err) {
-            toast(err.message, true);
-          }
+          // 与右键菜单的删除共用同一套逻辑，避免两份实现行为不一致
+          await removeTarget({
+            target_id: editor.selectedId,
+            target_type: editor.targetType,
+            name: editor.data?.name || editor.selectedId
+          });
+          if (onRefresh) onRefresh();
         }
       },
       '删除'
@@ -4148,47 +4284,652 @@ function editorToolbar(onRefresh) {
   );
 }
 
+/* ---------------- AI 起草接口 ---------------- */
+
+/**
+ * 一句话需求 -> 预览 -> 落库为新接口。
+ * 生成结果先预览，用户确认后才真正创建，避免 AI 幻觉直接污染项目数据。
+ */
+function openAiDraftDialog(onRefresh) {
+  if (!editor.projectId) {
+    toast('请先在「总览」页新建项目', true);
+    return;
+  }
+
+  const descInput = h('textarea', {
+    rows: 3,
+    class: 'mono-input',
+    placeholder: '例如：用户登录接口，手机号 + 密码，返回 token 与用户信息',
+    oninput: () => {}
+  });
+
+  const previewHost = h('div', { class: 'ai-draft-preview' }, h('div', { class: 'empty' }, '填写需求后点「生成」'));
+  let draft = null;
+
+  const renderPreview = () => {
+    if (!draft) {
+      previewHost.replaceChildren(h('div', { class: 'empty' }, '填写需求后点「生成」'));
+      return;
+    }
+    const rows = [
+      ['名称', draft.name],
+      ['方法', draft.method],
+      ['URL', draft.url]
+    ];
+    const nodes = rows.map(([k, v]) =>
+      h('div', { class: 'kv-line' }, h('span', { class: 'k' }, k), h('span', { class: 'v mono' }, String(v || '-')))
+    );
+
+    if (draft.query?.length) {
+      nodes.push(h('div', { class: 'kv-line' }, h('span', { class: 'k' }, 'Query'), h('span', { class: 'v' }, draft.query.map((p) => p.key).join(', '))));
+    }
+    if (draft.headers?.length) {
+      nodes.push(h('div', { class: 'kv-line' }, h('span', { class: 'k' }, 'Header'), h('span', { class: 'v' }, draft.headers.map((p) => p.key).join(', '))));
+    }
+    if (draft.body_mode && draft.body_mode !== 'none') {
+      nodes.push(
+        h('div', { class: 'kv-line' },
+          h('span', { class: 'k' }, `Body(${draft.body_mode})`),
+          h('pre', { class: 'code-snippet', style: 'max-height:160px;margin:6px 0 0' }, draft.body_raw || '')
+        )
+      );
+    }
+    if (draft.description) {
+      nodes.push(h('div', { class: 'kv-line' }, h('span', { class: 'k' }, '说明'), h('span', { class: 'v' }, draft.description)));
+    }
+    if (draft.notes?.length) {
+      nodes.push(h('div', { class: 'form-hint mt8' }, `待确认：${draft.notes.join('；')}`));
+    }
+    previewHost.replaceChildren(...nodes);
+  };
+
+  const generateBtn = h('button', {
+    class: 'primary',
+    onclick: async () => {
+      const description = String(descInput.value || '').trim();
+      if (!description) {
+        toast('请先描述需求', true);
+        return;
+      }
+      generateBtn.disabled = true;
+      generateBtn.textContent = '生成中…';
+      try {
+        const res = await api.post('/ai/draft-api', { project_id: editor.projectId, description });
+        draft = res.draft;
+        renderPreview();
+      } catch (err) {
+        toast(err.message, true);
+        previewHost.replaceChildren(h('div', { class: 'debug-error' }, err.message));
+      } finally {
+        generateBtn.disabled = false;
+        generateBtn.textContent = '重新生成';
+      }
+    }
+  });
+
+  const createBtn = h('button', {
+    class: 'primary',
+    onclick: async () => {
+      if (!draft) {
+        toast('请先生成接口草案', true);
+        return;
+      }
+      try {
+        // 1. 建壳（拿到 target_id）
+        const created = await api.post(`/projects/${editor.projectId}/apis`, {
+          name: draft.name,
+          target_type: 'api',
+          method: draft.method,
+          url: draft.url,
+          parent_id: '0'
+        });
+
+        // 2. 拉一版默认 data，再把 AI 的字段填进去（保持结构完整）
+        const fresh = await api.get(`/projects/${editor.projectId}/apis/${created.target_id}`);
+        const data = deepClone(fresh.data || {});
+        data.name = draft.name;
+        data.method = draft.method;
+        data.url = draft.url;
+        data.description = draft.description || '';
+        data.request = data.request || defaultRequest();
+        data.request.query = { ...(data.request.query || {}), parameter: draft.query || [], query_add_equal: 1 };
+        data.request.header = { ...(data.request.header || {}), parameter: draft.headers || [] };
+        data.request.body = {
+          ...(data.request.body || defaultRequest().body),
+          mode: draft.body_mode || 'none',
+          raw: draft.body_raw || ''
+        };
+        if (draft.response_raw) {
+          data.response = data.response || { example: [], is_check_result: 1 };
+          data.response.example = [
+            {
+              example_id: `${Date.now().toString(16)}`,
+              expect: {
+                code: '200',
+                content_type: 'json',
+                is_default: 1,
+                name: '成功',
+                schema: { type: 'object', properties: {} },
+                verify_type: 'schema'
+              },
+              raw: draft.response_raw,
+              raw_parameter: []
+            }
+          ];
+        }
+        await api.put(`/projects/${editor.projectId}/apis/${created.target_id}`, { data });
+
+        closeModal();
+        await focusTarget(created.target_id, onRefresh);
+        notifyAction('create', draft.name);
+      } catch (err) {
+        toast(`创建失败：${err.message}`, true);
+      }
+    }
+  });
+
+  const body = h(
+    'div',
+    { class: 'ai-draft-body' },
+    h('div', { class: 'form-row' },
+      h('label', { class: 'form-label' }, '需求'),
+      h('div', { class: 'form-control' }, descInput, h('div', { class: 'form-hint' }, '一句话描述接口用途即可，AI 会补全方法、URL、参数与响应示例'))
+    ),
+    h('div', { class: 'row-gap mt12' }, generateBtn),
+    previewHost
+  );
+
+  showModal('AI 起草接口', body, [h('button', { onclick: closeModal }, '取消'), createBtn]);
+  setTimeout(() => descInput.focus(), 60);
+}
+
 /* ---------------- 树 ---------------- */
+
+/** 节点展示名：接口优先 name，兜底 url / target_id */
+function nodeLabel(node) {
+  return node.name || node.url || node.target_id;
+}
+
+function nodeIcon(node) {
+  if (node.target_type === 'folder') return '📁';
+  if (node.target_type === 'doc') return '📄';
+  if (node.target_type === 'sse') return '📡';
+  return '';
+}
+
+/**
+ * 按关键词过滤树：保留命中的节点与其祖先链。
+ * 命中时不折叠（强制展开），否则用户会以为搜不到。
+ * @returns {Array} 过滤后的节点数组（不修改原树）
+ */
+function filterTree(nodes, keyword) {
+  const kw = String(keyword || '').trim().toLowerCase();
+  if (!kw) return nodes;
+
+  const hit = (node) => {
+    const fields = [node.name, node.url, node.method, node.target_id];
+    return fields.some((f) => String(f || '').toLowerCase().includes(kw));
+  };
+
+  const walk = (list) => {
+    const out = [];
+    for (const node of list) {
+      const children = node.children?.length ? walk(node.children) : [];
+      if (hit(node) || children.length > 0) {
+        out.push({ ...node, children });
+      }
+    }
+    return out;
+  };
+  return walk(nodes);
+}
+
+/** 判断 candidateId 是否是 ancestorId 自己或它的子孙（拖拽时防止把目录拖进自己） */
+function isSelfOrDescendant(candidateId, ancestorId) {
+  if (String(candidateId) === String(ancestorId)) return true;
+  let changed = true;
+  const set = new Set([String(ancestorId)]);
+  const items = editor.apiIndex || [];
+  while (changed) {
+    changed = false;
+    for (const item of items) {
+      if (item.parent_id && set.has(String(item.parent_id)) && !set.has(String(item.target_id))) {
+        set.add(String(item.target_id));
+        changed = true;
+      }
+    }
+  }
+  return set.has(String(candidateId));
+}
 
 function renderTreeNodes(nodes, depth = 0) {
   const out = [];
+  const keyword = editor.treeKeyword || '';
+
   for (const node of nodes) {
     const indent = 10 + depth * 14;
-    const icon = node.target_type === 'folder' ? '📁' : node.target_type === 'doc' ? '📄' : node.target_type === 'sse' ? '📡' : '';
+    const hasChildren = Boolean(node.children?.length);
+    const collapsed = !keyword && editor.collapsed.has(String(node.target_id));
+    const label = nodeLabel(node);
 
-    out.push(
-      h(
-        'div',
-        {
-          class: `tree-row${editor.selectedId === node.target_id ? ' active' : ''}`,
-          style: `padding-left:${indent}px`,
-          onclick: async () => {
-            if (hasUnsaved() && !confirm('当前接口有未保存的修改（含用例 / Mock），确定切换？')) return;
-            try {
-              await loadApi(editor.projectId, node.target_id);
-              rerenderTree();
-              rerenderPane();
-            } catch (err) {
-              toast(err.message, true);
-            }
+    const caret = hasChildren
+      ? h('span', {
+          class: `tree-caret${collapsed ? ' collapsed' : ''}`,
+          onclick: (e) => {
+            e.stopPropagation();
+            const id = String(node.target_id);
+            if (editor.collapsed.has(id)) editor.collapsed.delete(id);
+            else editor.collapsed.add(id);
+            rerenderTree();
+          }
+        }, '▾')
+      : h('span', { class: 'tree-caret tree-caret-empty' });
+
+    const row = h(
+      'div',
+      {
+        class: `tree-row${editor.selectedId === node.target_id ? ' active' : ''}`,
+        style: `padding-left:${indent}px`,
+        draggable: 'true',
+        'data-id': node.target_id,
+        'data-type': node.target_type,
+        title: node.url ? `${label}\n${node.url}` : label,
+        onclick: async () => {
+          if (hasUnsaved() && !confirm('当前接口有未保存的修改（含用例 / Mock），确定切换？')) return;
+          try {
+            await loadApi(editor.projectId, node.target_id);
+            rerenderTree();
+            rerenderPane();
+          } catch (err) {
+            toast(err.message, true);
           }
         },
-        h('span', { class: 'tree-icon' }, icon),
-        node.method ? h('span', { class: `method ${node.method}` }, node.method) : null,
-        h('span', { class: 'tree-name' }, node.name || node.url || node.target_id)
-      )
+        ondblclick: (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          startInlineRename(row, node);
+        },
+        oncontextmenu: (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          openTreeContextMenu(e, node);
+        },
+        ondragstart: (e) => {
+          treeDrag.sourceId = String(node.target_id);
+          treeDrag.sourceType = node.target_type;
+          row.classList.add('dragging');
+          try {
+            e.dataTransfer.effectAllowed = 'move';
+            e.dataTransfer.setData('text/plain', node.target_id);
+          } catch {}
+        },
+        ondragend: () => {
+          row.classList.remove('dragging');
+          clearTreeDropMarks();
+          treeDrag.sourceId = null;
+          treeDrag.sourceType = null;
+        },
+        ondragover: (e) => {
+          if (!treeDrag.sourceId || treeDrag.sourceId === String(node.target_id)) return;
+          // 目录不能拖进自己或自己的子孙里
+          if (isSelfOrDescendant(treeDrag.sourceId, node.target_id)) {
+            e.preventDefault();
+            clearTreeDropMarks();
+            row.classList.add('drop-forbidden');
+            return;
+          }
+          e.preventDefault();
+          try {
+            e.dataTransfer.dropEffect = 'move';
+          } catch {}
+          const zone = dropZone(e, row, node);
+          clearTreeDropMarks();
+          row.classList.add(zone === 'child' ? 'drop-child' : zone === 'before' ? 'drop-before' : 'drop-after');
+        },
+        ondragleave: () => {
+          row.classList.remove('drop-child', 'drop-before', 'drop-after', 'drop-forbidden');
+        },
+        ondrop: async (e) => {
+          e.preventDefault();
+          const zone = dropZone(e, row, node);
+          clearTreeDropMarks();
+          const sourceId = treeDrag.sourceId;
+          treeDrag.sourceId = null;
+          treeDrag.sourceType = null;
+          if (!sourceId || sourceId === String(node.target_id)) return;
+          await moveTreeNode(sourceId, node, zone);
+        }
+      },
+      caret,
+      h('span', { class: 'tree-icon' }, nodeIcon(node)),
+      node.method ? h('span', { class: `method ${node.method}` }, node.method) : null,
+      h('span', { class: 'tree-name' }, label)
     );
 
-    if (node.children?.length) out.push(...renderTreeNodes(node.children, depth + 1));
+    out.push(row);
+
+    if (hasChildren && !collapsed) {
+      out.push(...renderTreeNodes(node.children, depth + 1));
+    }
   }
   return out;
+}
+
+/* ---------------- 树：拖拽排序 ---------------- */
+
+const treeDrag = { sourceId: null, sourceType: null };
+
+function clearTreeDropMarks() {
+  document
+    .querySelectorAll('.tree-row.drop-child, .tree-row.drop-before, .tree-row.drop-after, .tree-row.drop-forbidden, .tree-row.dragging')
+    .forEach((n) => n.classList.remove('drop-child', 'drop-before', 'drop-after', 'drop-forbidden', 'dragging'));
+}
+
+/** 落点判定：上 1/4 = 插到前面，下 1/4 = 插到后面，中间 = 放进目录 */
+function dropZone(e, row, node) {
+  const rect = row.getBoundingClientRect();
+  const ratio = rect.height > 0 ? (e.clientY - rect.top) / rect.height : 0.5;
+  if (node.target_type === 'folder') {
+    if (ratio < 0.25) return 'before';
+    if (ratio > 0.75) return 'after';
+    return 'child';
+  }
+  return ratio < 0.5 ? 'before' : 'after';
+}
+
+/** 同层相邻两项之间插入：取两侧 sort 的中点 */
+function midpointSort(targetNode, zone) {
+  const siblings = (editor.apiIndex || [])
+    .filter((i) => String(i.parent_id || '0') === String(targetNode.parent_id || '0'))
+    .sort((a, b) => (a.sort ?? 0) - (b.sort ?? 0));
+
+  const idx = siblings.findIndex((i) => String(i.target_id) === String(targetNode.target_id));
+  const targetSort = Number(targetNode.sort ?? siblings[idx]?.sort ?? 1000);
+
+  if (zone === 'before') {
+    const prev = idx > 0 ? Number(siblings[idx - 1].sort ?? 0) : targetSort - 2000;
+    return Math.floor((prev + targetSort) / 2);
+  }
+  const next = idx >= 0 && idx < siblings.length - 1 ? Number(siblings[idx + 1].sort ?? 0) : targetSort + 2000;
+  return Math.floor((targetSort + next) / 2);
+}
+
+/** 目标目录下最后一个子项的 sort，用于「拖进目录」时排到末尾 */
+function lastChildSort(folderId) {
+  const children = (editor.apiIndex || []).filter((i) => String(i.parent_id || '0') === String(folderId));
+  if (children.length === 0) return 1000;
+  return Math.max(...children.map((c) => Number(c.sort ?? 0))) + 1000;
+}
+
+/**
+ * 把一个节点移动到目标位置。
+ * @param {'before'|'after'|'child'} zone
+ */
+async function moveTreeNode(sourceId, targetNode, zone) {
+  if (isSelfOrDescendant(sourceId, targetNode.target_id)) {
+    toast('不能把目录移动到它自己或其子目录里', true);
+    return;
+  }
+  const patch =
+    zone === 'child'
+      ? { target_id: sourceId, parent_id: String(targetNode.target_id), sort: lastChildSort(targetNode.target_id) }
+      : {
+          target_id: sourceId,
+          parent_id: String(targetNode.parent_id || '0'),
+          sort: midpointSort(targetNode, zone)
+        };
+
+  try {
+    await api.post(`/projects/${editor.projectId}/apis/reorder`, { items: [patch] });
+    await loadTree(editor.projectId);
+    rerenderTree();
+  } catch (err) {
+    toast(`移动失败：${err.message}`, true);
+  }
+}
+
+/* ---------------- 树：右键菜单 ---------------- */
+
+let ctxMenu = null;
+
+function closeTreeContextMenu() {
+  if (!ctxMenu) return;
+  ctxMenu.remove();
+  ctxMenu = null;
+  document.removeEventListener('click', closeTreeContextMenu, true);
+  document.removeEventListener('keydown', onCtxKeydown, true);
+  window.removeEventListener('resize', closeTreeContextMenu);
+  window.removeEventListener('scroll', closeTreeContextMenu, true);
+}
+
+function onCtxKeydown(e) {
+  if (e.key === 'Escape') {
+    e.stopPropagation();
+    closeTreeContextMenu();
+  }
+}
+
+function ctxMenuItem(label, onClick, { danger = false, hint = '' } = {}) {
+  return h(
+    'div',
+    {
+      class: `ctx-menu-item${danger ? ' danger' : ''}`,
+      title: hint,
+      onclick: (e) => {
+        e.stopPropagation();
+        closeTreeContextMenu();
+        Promise.resolve(onClick()).catch((err) => toast(err.message, true));
+      }
+    },
+    label
+  );
+}
+
+function openTreeContextMenu(e, node) {
+  closeTreeContextMenu();
+  const items = [];
+  const isFolder = node.target_type === 'folder';
+
+  items.push(ctxMenuItem('打开', async () => {
+    if (hasUnsaved() && !confirm('当前接口有未保存的修改（含用例 / Mock），确定切换？')) return;
+    await loadApi(editor.projectId, node.target_id);
+    rerenderTree();
+    rerenderPane();
+  }));
+
+  items.push(ctxMenuItem('重命名', () => {
+    const row = treeHost?.querySelector(`.tree-row[data-id="${cssEscape(node.target_id)}"]`);
+    if (row) startInlineRename(row, node);
+  }, { hint: '也可以双击名称直接改名' }));
+
+  items.push(ctxMenuItem('复制', () => duplicateTarget(node), { hint: '在同目录生成一份副本' }));
+
+  if (isFolder) {
+    items.push(h('div', { class: 'ctx-menu-sep' }));
+    const refresh = () => window.__designRefresh?.();
+    items.push(ctxMenuItem('在此新建接口', () => openCreateDialog('api', refresh, { parentId: node.target_id })));
+    items.push(ctxMenuItem('在此新建目录', () => openCreateDialog('folder', refresh, { parentId: node.target_id })));
+    items.push(ctxMenuItem('在此新建文档', () => openCreateDialog('doc', refresh, { parentId: node.target_id })));
+  }
+
+  items.push(h('div', { class: 'ctx-menu-sep' }));
+  items.push(ctxMenuItem('删除', () => removeTarget(node), { danger: true, hint: isFolder ? '目录会连同其下所有内容一起删除' : '' }));
+
+  ctxMenu = h('div', { class: 'ctx-menu' }, ...items);
+  document.body.append(ctxMenu);
+
+  // 视口内收边，避免贴边被裁掉
+  const rect = ctxMenu.getBoundingClientRect();
+  const x = Math.min(e.clientX, window.innerWidth - rect.width - 8);
+  const y = Math.min(e.clientY, window.innerHeight - rect.height - 8);
+  ctxMenu.style.left = `${Math.max(4, x)}px`;
+  ctxMenu.style.top = `${Math.max(4, y)}px`;
+
+  document.addEventListener('click', closeTreeContextMenu, true);
+  document.addEventListener('keydown', onCtxKeydown, true);
+  window.addEventListener('resize', closeTreeContextMenu);
+  window.addEventListener('scroll', closeTreeContextMenu, true);
+}
+
+/** 转义 target_id 以便用在 querySelector 里（id 里可能有特殊字符） */
+function cssEscape(value) {
+  if (typeof CSS !== 'undefined' && CSS.escape) return CSS.escape(String(value));
+  return String(value).replace(/["\\]/g, '\\$&');
+}
+
+/* ---------------- 树：改名 / 复制 / 删除 ---------------- */
+
+/** 双击后把名称换成输入框；回车或失焦提交，Esc 还原 */
+function startInlineRename(row, node) {
+  const nameEl = row.querySelector('.tree-name');
+  if (!nameEl || row.querySelector('.tree-rename')) return;
+
+  const original = nodeLabel(node);
+  const inputEl = h('input', {
+    type: 'text',
+    class: 'tree-rename',
+    value: original,
+    onclick: (e) => e.stopPropagation(),
+    ondblclick: (e) => e.stopPropagation()
+  });
+
+  let done = false;
+  const finish = async (commit) => {
+    if (done) return;
+    done = true;
+    const next = String(inputEl.value || '').trim();
+    // 还原 DOM，后续由 rerenderTree 统一重建
+    inputEl.replaceWith(h('span', { class: 'tree-name' }, commit && next ? next : original));
+    if (!commit || !next || next === original) return;
+    await renameTarget(node, next);
+  };
+
+  inputEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      finish(true);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      finish(false);
+    }
+  });
+  inputEl.addEventListener('blur', () => finish(true));
+
+  nameEl.replaceWith(inputEl);
+  inputEl.focus();
+  inputEl.select();
+}
+
+/** 只更新某个树节点的显示名，避免整树重绘让输入框失焦 */
+function syncTreeName(targetId, name) {
+  if (!treeHost) return;
+  const row = treeHost.querySelector(`.tree-row[data-id="${cssEscape(targetId)}"]`);
+  if (!row) return;
+  const nameEl = row.querySelector('.tree-name');
+  if (nameEl) nameEl.textContent = name;
+  const node = editor.apiIndex.find((i) => String(i.target_id) === String(targetId));
+  row.title = node?.url ? `${name}\n${node.url}` : name;
+}
+
+/** 改名：只提交 name，服务端会合并进已存文件，不动参数与用例 */
+async function renameTarget(node, name) {
+  const trimmed = String(name || '').trim();
+  if (!trimmed) {
+    toast('名称不能为空', true);
+    return;
+  }
+  try {
+    await api.put(`/projects/${editor.projectId}/apis/${node.target_id}`, { data: { name: trimmed } });
+
+    // 改的是当前打开的这个，就同步编辑器里的名称与头部
+    if (String(editor.selectedId) === String(node.target_id) && editor.data) {
+      editor.data.name = trimmed;
+      rerenderPane();
+    }
+    await loadTree(editor.projectId);
+    rerenderTree();
+    notifyAction('update', trimmed);
+  } catch (err) {
+    toast(`改名失败：${err.message}`, true);
+    rerenderTree();
+  }
+}
+
+/** 复制为副本：建壳 → 取源最新 data → 全量写入副本（含用例与 Mock） */
+async function duplicateTarget(node) {
+  const sourceName = nodeLabel(node);
+  const copyName = `${sourceName} 副本`;
+  try {
+    const created = await api.post(`/projects/${editor.projectId}/apis`, {
+      name: copyName,
+      target_type: node.target_type,
+      method: node.method || 'GET',
+      url: node.url || '',
+      parent_id: String(node.parent_id || '0')
+    });
+
+    // 目录只复制自身（其下内容不跟过去），与「另存为」保持一致
+    if (node.target_type === 'api' || node.target_type === 'doc') {
+      // 拉取源最新数据，避免用编辑器里可能过期的快照
+      let latest = null;
+      try {
+        const fresh = await api.get(`/projects/${editor.projectId}/apis/${node.target_id}`);
+        latest = fresh?.data || null;
+      } catch {
+        latest = null;
+      }
+      if (latest) {
+        const payload = deepClone(latest);
+        payload.name = copyName;
+        payload.parent_id = String(node.parent_id || '0');
+        payload.target_id = created.target_id;
+        await api.put(`/projects/${editor.projectId}/apis/${created.target_id}`, { data: payload });
+      }
+    }
+
+    await loadTree(editor.projectId);
+    rerenderTree();
+    notifyAction('saveAs', copyName);
+  } catch (err) {
+    toast(`复制失败：${err.message}`, true);
+  }
+}
+
+/** 删除节点（目录级联），若删的是当前选中项则清空编辑器 */
+async function removeTarget(node) {
+  const isFolder = node.target_type === 'folder';
+  const label = isFolder ? '目录（含其下所有内容）' : node.target_type === 'doc' ? '文档' : '接口';
+  const name = nodeLabel(node);
+  if (!confirm(`确定删除${label}「${name}」？`)) return;
+
+  try {
+    await api.req('DELETE', `/projects/${editor.projectId}/apis/${node.target_id}`);
+
+    // 删掉的正好是当前打开的（目录要连同子孙一起判断）
+    const removedSelf = String(editor.selectedId) === String(node.target_id);
+    const removedChild = editor.selectedId && isSelfOrDescendant(editor.selectedId, node.target_id);
+    if (removedSelf || removedChild) {
+      editor.selectedId = null;
+      editor.data = null;
+      discardUnsaved();
+      rerenderPane();
+    }
+
+    await loadTree(editor.projectId);
+    rerenderTree();
+    notifyAction('delete', name);
+  } catch (err) {
+    toast(`删除失败：${err.message}`, true);
+  }
 }
 
 let treeHost = null;
 
 function rerenderTree() {
   if (!treeHost) return;
-  const nodes = renderTreeNodes(editor.tree);
+  const filtered = filterTree(editor.tree, editor.treeKeyword);
+  const nodes = renderTreeNodes(filtered);
   if (nodes.length === 0) {
     // 没有项目时，引导去总览页建项目（否则用户点新建必然失败）
     if (!editor.projectId) {
@@ -4205,9 +4946,9 @@ function rerenderTree() {
               {
                 class: 'small primary',
                 onclick: () => {
-                  const state = window.__consoleState;
-                  if (state) {
-                    state.view = 'overview';
+                  const st = window.__consoleState;
+                  if (st) {
+                    st.view = 'overview';
                     window.__consoleRender?.();
                   }
                 }
@@ -4219,7 +4960,9 @@ function rerenderTree() {
       );
       return;
     }
-    treeHost.replaceChildren(h('div', { class: 'empty' }, '还没有接口，点上方新建'));
+    treeHost.replaceChildren(
+      h('div', { class: 'empty' }, editor.treeKeyword ? '没有匹配的接口' : '还没有接口，点上方新建')
+    );
     return;
   }
   treeHost.replaceChildren(...nodes);
@@ -4228,6 +4971,8 @@ function rerenderTree() {
 /* ---------------- 主视图 ---------------- */
 
 function viewApiDesign() {
+  const state = window.__consoleState;
+  if (!state) return h('div', { class: 'empty' }, '控制台状态未就绪，请刷新页面');
   if (!state.designProjectId) {
     state.designProjectId = state.projects[0]?.project_id || null;
   }
@@ -4241,6 +4986,11 @@ function viewApiDesign() {
         editor.projectId = e.target.value;
         editor.selectedId = null;
         editor.data = null;
+        // 换项目后旧的搜索词与折叠状态都没有意义
+        editor.treeKeyword = '';
+        editor.collapsed.clear();
+        const si = document.querySelector('.design-tree-search');
+        if (si) si.value = '';
         discardUnsaved();
         // 与顶栏的项目/环境选择保持一致
         if (state.currentProjectId !== e.target.value) {
@@ -4258,6 +5008,23 @@ function viewApiDesign() {
 
   treeHost = h('div', { class: 'design-tree' });
   paneHost = h('div', { class: 'design-editor-pane' });
+
+  // 树搜索：防抖后只重绘树，不影响编辑器
+  let searchTimer = null;
+  const searchInput = h('input', {
+    type: 'search',
+    class: 'design-tree-search',
+    placeholder: '搜索接口 / 目录 / URL',
+    value: editor.treeKeyword || '',
+    oninput: (e) => {
+      const value = e.target.value;
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => {
+        editor.treeKeyword = value;
+        rerenderTree();
+      }, 180);
+    }
+  });
 
   const refresh = async () => {
     await refreshDesign();
@@ -4278,6 +5045,7 @@ function viewApiDesign() {
         h('span', { class: 'hint' }, '项目'),
         projectSelect
       ),
+      searchInput,
       treeHost
     ),
     h(
@@ -4364,3 +5132,5 @@ window.addEventListener('beforeunload', (e) => {
   e.preventDefault();
   e.returnValue = '';
 });
+
+})();

@@ -329,6 +329,7 @@ async function loadProjectData(projectId) {
 
 const DEFAULT_NAV = [
   { key: 'design', label: '接口设计', icon: '✎' },
+  { key: 'automation', label: '自动化测试', icon: '⏱' },
   { key: 'transfer', label: '导入导出', icon: '⇅' },
   { key: 'envvars', label: '环境与变量', icon: '⛁' },
   { key: 'recent', label: '最近', icon: '◷' },
@@ -1394,6 +1395,147 @@ function viewAppearance() {
         ),
         el('div', { class: 'hint mt8' }, '修改后需重启服务生效（或先保存再刷新页面验证）')
       )
+    ),
+
+    viewAiSettings(cfg)
+  );
+}
+
+/**
+ * AI 设置区块：OpenAI 兼容接口（可作为 DeepSeek / 通义 / Ollama 等的客户端）。
+ * api_key 永不回显：输入框留空表示保持原值，勾选「清除」才会清空。
+ */
+function viewAiSettings(cfg) {
+  const ai = cfg.ai || {};
+  const hasKey = Boolean(ai.has_api_key);
+  const draft = { base_url: ai.base_url || '', model: ai.model || '', api_key: '', clearKey: false, enabled: Boolean(ai.enabled) };
+
+  const persist = async () => {
+    const patch = {
+      enabled: draft.enabled,
+      base_url: draft.base_url,
+      model: draft.model
+    };
+    if (draft.clearKey) patch.api_key = '';
+    else if (draft.api_key) patch.api_key = draft.api_key;
+    try {
+      state.config = await api.put('/config/ai', patch);
+      render();
+      toast(patch.api_key === '' ? '已清除 API Key' : 'AI 设置已保存');
+    } catch (err) {
+      toast(err.message, true);
+    }
+  };
+
+  return el(
+    'div',
+    { class: 'section' },
+    el('div', { class: 'section-title' }, 'AI 设置'),
+    el(
+      'div',
+      { class: 'card' },
+      el(
+        'div',
+        { class: 'row-gap' },
+        el(
+          'label',
+          { class: 'check' },
+          el('input', {
+            type: 'checkbox',
+            checked: draft.enabled,
+            onchange: (e) => {
+              draft.enabled = e.target.checked;
+            }
+          }),
+          '启用 AI 辅助（解析导入 / 起草接口 / 生成用例）'
+        )
+      ),
+      el(
+        'div',
+        { class: 'row-gap mt16', style: 'flex-wrap:wrap' },
+        el('label', { class: 'hint', style: 'min-width:92px' }, 'API 地址'),
+        el('input', {
+          type: 'text',
+          style: 'flex:1;min-width:240px',
+          value: draft.base_url,
+          placeholder: 'https://api.openai.com/v1',
+          oninput: (e) => {
+            draft.base_url = e.target.value;
+          }
+        })
+      ),
+      el(
+        'div',
+        { class: 'row-gap mt8', style: 'flex-wrap:wrap' },
+        el('label', { class: 'hint', style: 'min-width:92px' }, '模型'),
+        el('input', {
+          type: 'text',
+          style: 'flex:1;min-width:240px',
+          value: draft.model,
+          placeholder: 'gpt-4o-mini / deepseek-chat',
+          oninput: (e) => {
+            draft.model = e.target.value;
+          }
+        })
+      ),
+      el(
+        'div',
+        { class: 'row-gap mt8', style: 'flex-wrap:wrap' },
+        el('label', { class: 'hint', style: 'min-width:92px' }, 'API Key'),
+        el('input', {
+          type: 'password',
+          style: 'flex:1;min-width:240px',
+          value: draft.api_key,
+          placeholder: hasKey ? '已保存（留空表示不修改）' : 'sk-…',
+          oninput: (e) => {
+            draft.api_key = e.target.value;
+          }
+        }),
+        hasKey
+          ? el(
+              'label',
+              { class: 'check' },
+              el('input', {
+                type: 'checkbox',
+                checked: draft.clearKey,
+                onchange: (e) => {
+                  draft.clearKey = e.target.checked;
+                }
+              }),
+              '清除'
+            )
+          : null
+      ),
+      el(
+        'div',
+        { class: 'row-gap mt16' },
+        el('button', { class: 'primary small', onclick: persist }, '保存 AI 设置'),
+        el(
+          'button',
+          {
+            class: 'small',
+            onclick: async () => {
+              try {
+                await api.post('/ai/ping', {});
+                toast('AI 连通性正常');
+              } catch (err) {
+                toast(`连通性测试失败：${err.message}`, true);
+              }
+            }
+          },
+          '测试连通性'
+        ),
+        el('span', { class: 'hint' }, hasKey ? '已配置 Key' : '未配置 Key')
+      ),
+      el(
+        'div',
+        { class: 'form-hint mt12' },
+        '兼容任何 OpenAI 风格的 /chat/completions 服务（OpenAI、DeepSeek、通义、Ollama 本地模型等）。',
+        el('br'),
+        'API Key 以明文保存在本机 config.json（与本服务的 MCP token 同级保护），请勿在共享机器上填写。',
+        el('br'),
+        '启用后，请求内容会发送到你填写的这个第三方地址。'
+      )
     )
   );
 }
@@ -1494,6 +1636,7 @@ function renderTopbarEnvs() {
           window.ApiEnvvars.state.projectId = e.target.value;
           window.ApiEnvvars.state.activeEnvId = '';
         }
+        if (window.ApiAutomation) window.ApiAutomation.reset();
         render();
         if (state.view === 'envvars') await window.ApiEnvvars.reload();
         if (state.view === 'transfer' && window.ApiTransfer) await window.ApiTransfer.reload();
@@ -1541,33 +1684,8 @@ function render() {
     window.ApiDesign?.unbindShortcut?.();
   }
 
-  // 供子模块（最近 / 接口设计）访问的桥接
-  window.__consoleState = state;
-  window.__consoleToast = toast;
-  window.__consoleApi = api;
-  window.__consoleRender = render;
-  window.__consoleCopy = copyText;
-  window.__consoleCopyFailed = toastCopyFailed;
-  window.__consoleCloseModal = closeModal;
-  window.__consoleShowModal = showModal;
-  window.__consoleOpenDesign = async (projectId, targetId) => {
-    if (state.view === 'design' && window.ApiDesign?.hasUnsaved?.()) {
-      if (!confirm('接口编辑器有未保存的修改，确定离开？')) return;
-      window.ApiDesign.discardUnsaved();
-    }
-    state.designProjectId = projectId;
-    state.view = 'design';
-    render();
-    // 等设计器首屏渲染完再定位到指定接口
-    setTimeout(async () => {
-      try {
-        if (window.ApiDesign?.state) {
-          window.ApiDesign.state.projectId = projectId;
-        }
-        if (window.ApiDesign?.openTarget) await window.ApiDesign.openTarget(projectId, targetId);
-      } catch {}
-    }, 120);
-  };
+  // 供子模块（最近 / 接口设计）访问的桥接，见文件末尾的 installConsoleBridge
+  installConsoleBridge();
 
   let viewNode;
   switch (state.view) {
@@ -1579,6 +1697,11 @@ function render() {
       break;
     case 'design':
       viewNode = window.ApiDesign ? window.ApiDesign.view() : el('div', { class: 'empty' }, '编辑器加载失败');
+      break;
+    case 'automation':
+      viewNode = window.ApiAutomation
+        ? window.ApiAutomation.view()
+        : el('div', { class: 'empty' }, '自动化测试加载失败');
       break;
     case 'envvars':
       viewNode = window.ApiEnvvars ? window.ApiEnvvars.view() : el('div', { class: 'empty' }, '环境与变量加载失败');
@@ -1614,6 +1737,46 @@ function render() {
   }
   if (viewNode) content.append(viewNode);
 }
+
+/* ---------------- 桥接 ---------------- */
+
+/**
+ * 子模块（design / envvars / transfer / extra / recent）都包在 IIFE 里，
+ * 不再往全局挂内部函数。它们统一从这里取控制台的能力。
+ * 在 boot 之前调用一次，保证脚本加载完、首次 render 之前桥接就已就位。
+ */
+function installConsoleBridge() {
+  window.__consoleState = state;
+  window.__consoleToast = toast;
+  window.__consoleApi = api;
+  window.__consoleRender = render;
+  window.__consoleCopy = copyText;
+  window.__consoleCopyFailed = toastCopyFailed;
+  window.__consoleCloseModal = closeModal;
+  window.__consoleShowModal = showModal;
+  window.__consoleRefreshEnvs = refreshEnvironments;
+  window.__consoleRenderTopbarEnvs = renderTopbarEnvs;
+  window.__consoleOpenDesign = async (projectId, targetId) => {
+    if (state.view === 'design' && window.ApiDesign?.hasUnsaved?.()) {
+      if (!confirm('接口编辑器有未保存的修改，确定离开？')) return;
+      window.ApiDesign.discardUnsaved();
+    }
+    state.designProjectId = projectId;
+    state.view = 'design';
+    render();
+    // 等设计器首屏渲染完再定位到指定接口
+    setTimeout(async () => {
+      try {
+        if (window.ApiDesign?.state) {
+          window.ApiDesign.state.projectId = projectId;
+        }
+        if (window.ApiDesign?.openTarget) await window.ApiDesign.openTarget(projectId, targetId);
+      } catch {}
+    }, 120);
+  };
+}
+
+installConsoleBridge();
 
 /* ---------------- 启动 ---------------- */
 

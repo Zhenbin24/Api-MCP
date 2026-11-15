@@ -1,4 +1,5 @@
 import { flowId, stepId } from '../util/ids.js';
+import { collectTargetIds, countSteps, normalizeFlowNodes } from './flow-nodes.js';
 
 const FLOWS_INDEX_REL = 'project/executions/flows/index.json';
 const flowRelPath = (id) => `project/executions/flows/${id}.json`;
@@ -24,7 +25,7 @@ function summarizeFlow(flow) {
     description: flow.description,
     environment_id: flow.environment_id,
     source: flow.source,
-    step_count: Array.isArray(flow.steps) ? flow.steps.length : 0,
+    step_count: countSteps(flow.steps),
     created_at: flow.created_at,
     updated_at: flow.updated_at
   };
@@ -73,6 +74,8 @@ export function createFlow(target, { name, description, environmentId, steps, so
   if (!Array.isArray(steps) || steps.length === 0) {
     throw new Error('业务流程至少需要一个 HTTP 接口步骤');
   }
+  // 支持控制器嵌套；老格式（无 type）按普通步骤处理
+  const normalized = normalizeFlowNodes(target, steps);
   const now = target.now();
   return saveFlow(target, {
     flow_id: flowId(),
@@ -81,7 +84,7 @@ export function createFlow(target, { name, description, environmentId, steps, so
     description: String(description || '').trim(),
     environment_id: environmentId || undefined,
     source,
-    steps,
+    steps: normalized,
     created_at: now,
     updated_at: now
   });
@@ -89,15 +92,21 @@ export function createFlow(target, { name, description, environmentId, steps, so
 
 export function updateFlow(target, flowIdValue, patch) {
   const flow = assertFlow(target, flowIdValue);
+  const now = target.now();
   const next = {
     ...flow,
     name: patch.name !== undefined ? String(patch.name || '').trim() : flow.name,
     description: patch.description !== undefined ? String(patch.description || '').trim() : flow.description,
     environment_id: 'environmentId' in patch ? patch.environmentId : flow.environment_id,
-    steps: patch.steps !== undefined ? patch.steps : flow.steps
+    // 沿用在原计划里找到的快照，只更新结构
+    steps:
+      patch.steps !== undefined
+        ? normalizeFlowNodes(target, patch.steps, { existingNodes: flow.steps })
+        : flow.steps,
+    ...(patch.stop_on_fail !== undefined ? { stop_on_fail: Boolean(patch.stop_on_fail) } : {})
   };
   if (!next.name) throw new Error('请填写业务流程名称');
-  if (!Array.isArray(next.steps) || next.steps.length === 0) {
+  if (!Array.isArray(next.steps) || countSteps(next.steps) === 0) {
     throw new Error('业务流程至少需要一个 HTTP 接口步骤');
   }
   return saveFlow(target, next);

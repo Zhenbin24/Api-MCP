@@ -1,6 +1,10 @@
 /* 环境与变量：环境管理（含多 host 服务）/ 全局参数 / 全局变量
  * 挂在 window.ApiEnvvars 上，由 app.js 的侧栏「环境与变量」调用。 */
 
+/* 包进 IIFE：避免顶层函数（renderAll 等）泄漏到全局与其它页面脚本撞名 */
+(() => {
+'use strict';
+
 const EV_TABS = [
   ['env', '环境'],
   ['params', '全局参数'],
@@ -991,3 +995,5 @@ window.ApiEnvvars = {
     renderAll();
   }
 };
+
+})();
