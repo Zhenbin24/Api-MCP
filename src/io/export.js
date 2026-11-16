@@ -48,6 +48,20 @@ function folderChain(items, parentId) {
   return chain;
 }
 
+/**
+ * 参数的「示例值」。
+ *
+ * 设计页把示例值写在 example_value，调试页实际发送用的是 value；
+ * 导出文档时优先示例值，旧数据（只有 value）自动回落，避免导出变空白。
+ */
+function exampleOf(p) {
+  const example = p?.example_value;
+  if (example !== undefined && example !== null && example !== '') return String(example);
+  const value = p?.value;
+  if (value !== undefined && value !== null && value !== '') return String(value);
+  return '';
+}
+
 /** 参数列表 -> OpenAPI parameters（只处理 query / header / path） */
 function parametersFromRequest(request, chain) {
   const out = [];
@@ -60,7 +74,7 @@ function parametersFromRequest(request, chain) {
       required: false,
       ...(p.description ? { description: String(p.description) } : {}),
       schema: { type: 'string' },
-      ...(p.value !== undefined && p.value !== '' ? { example: String(p.value) } : {})
+      ...(exampleOf(p) !== '' ? { example: exampleOf(p) } : {})
     });
   }
 
@@ -73,7 +87,7 @@ function parametersFromRequest(request, chain) {
       required: false,
       ...(p.description ? { description: String(p.description) } : {}),
       schema: { type: 'string' },
-      ...(p.value !== undefined && p.value !== '' ? { example: String(p.value) } : {})
+      ...(exampleOf(p) !== '' ? { example: exampleOf(p) } : {})
     });
   }
 
@@ -239,12 +253,19 @@ function responsesFromApi(response) {
   return Object.keys(out).length > 0 ? out : { '200': { description: 'OK' } };
 }
 
-/** 收集项目里的 HTTP 接口（目录/文档/SSE 不导出） */
-function collectHttpApis(target) {
+/**
+ * 收集项目里的 HTTP 接口（目录/文档/SSE 不导出）。
+ * @param {object} target
+ * @param {{targetIds?: string[]}} [opts] targetIds 存在时只收集这些接口
+ *        （目录层级链仍用全量 items 计算，保证标签与目录名正确）
+ */
+function collectHttpApis(target, { targetIds } = {}) {
   const items = listApiItems(target);
+  const wanted = Array.isArray(targetIds) && targetIds.length > 0 ? new Set(targetIds.map(String)) : null;
   const out = [];
   for (const item of items) {
     if (item.target_type !== TARGET_TYPE.API) continue;
+    if (wanted && !wanted.has(String(item.target_id))) continue;
     const method = String(item.method || 'GET').toUpperCase();
     if (!METHODS.has(method)) continue;
     const file = readApiFile(target, item.target_id);
@@ -274,9 +295,9 @@ function projectBaseUrl(target) {
 }
 
 /** 项目 -> OpenAPI 3.0 对象 */
-export function projectToOpenApi(target, { projectId, projectName } = {}) {
+export function projectToOpenApi(target, { projectId, projectName, targetIds } = {}) {
   const meta = readProjectMeta(target.dataRoot, projectId) || {};
-  const apis = collectHttpApis(target);
+  const apis = collectHttpApis(target, { targetIds });
 
   const paths = {};
   const tagSet = new Set();
@@ -530,9 +551,9 @@ function buildPostmanTree(apis) {
 }
 
 /** 项目 -> Postman Collection v2.1 对象 */
-export function projectToPostman(target, { projectId, projectName } = {}) {
+export function projectToPostman(target, { projectId, projectName, targetIds } = {}) {
   const meta = readProjectMeta(target.dataRoot, projectId) || {};
-  const apis = collectHttpApis(target);
+  const apis = collectHttpApis(target, { targetIds });
   const base = projectBaseUrl(target);
 
   const collection = {
@@ -557,7 +578,7 @@ export function projectToPostman(target, { projectId, projectName } = {}) {
  * @param {object} options
  * @returns {{ filename: string, mime: string, content: string, format: string }}
  */
-export function exportProject(target, { projectId, projectName, format = 'openapi', includeRuns = false } = {}) {
+export function exportProject(target, { projectId, projectName, format = 'openapi', includeRuns = false, targetIds } = {}) {
   if (!EXPORT_FORMATS.includes(format)) {
     throw new Error(`不支持的导出格式：${format}，可选 ${EXPORT_FORMATS.join('/')}`);
   }
@@ -567,7 +588,7 @@ export function exportProject(target, { projectId, projectName, format = 'openap
   const base = safeFilename(name);
 
   if (format === 'postman') {
-    const collection = projectToPostman(target, { projectId, projectName: name });
+    const collection = projectToPostman(target, { projectId, projectName: name, targetIds });
     return {
       filename: `${base}.postman_collection.json`,
       mime: 'application/json; charset=utf-8',
@@ -578,7 +599,7 @@ export function exportProject(target, { projectId, projectName, format = 'openap
 
   // 文档类导出：Markdown / HTML / Word（HTML 包装的 .doc）
   if (format === 'markdown') {
-    const doc = projectToMarkdown(target, { projectId, projectName: name });
+    const doc = projectToMarkdown(target, { projectId, projectName: name, targetIds });
     return {
       filename: `${base}.md`,
       mime: 'text/markdown; charset=utf-8',
@@ -588,7 +609,7 @@ export function exportProject(target, { projectId, projectName, format = 'openap
   }
 
   if (format === 'html') {
-    const doc = projectToHtml(target, { projectId, projectName: name });
+    const doc = projectToHtml(target, { projectId, projectName: name, targetIds });
     return {
       filename: `${base}.html`,
       mime: 'text/html; charset=utf-8',
@@ -598,7 +619,7 @@ export function exportProject(target, { projectId, projectName, format = 'openap
   }
 
   if (format === 'word') {
-    const doc = projectToWord(target, { projectId, projectName: name });
+    const doc = projectToWord(target, { projectId, projectName: name, targetIds });
     return {
       filename: `${base}.doc`,
       // Word 认这个 MIME，用 .doc 扩展名打开不会提示格式错误
@@ -608,7 +629,7 @@ export function exportProject(target, { projectId, projectName, format = 'openap
     };
   }
 
-  const openapi = projectToOpenApi(target, { projectId, projectName: name });
+  const openapi = projectToOpenApi(target, { projectId, projectName: name, targetIds });
 
   if (format === 'openapi_yaml') {
     return {
@@ -663,7 +684,7 @@ function paramsTableMd(title, params, { withDescription = true } = {}) {
     for (const p of rows) {
       const required = Number(p.not_null) === 1 ? '是' : '否';
       lines.push(
-        `| ${mdCell(p.key)} | ${mdCell(p.field_type || 'String')} | ${required} | ${mdCell(p.description)} | ${mdCell(p.value)} |`
+        `| ${mdCell(p.key)} | ${mdCell(p.field_type || 'String')} | ${required} | ${mdCell(p.description)} | ${mdCell(exampleOf(p))} |`
       );
     }
   } else {
@@ -764,11 +785,11 @@ function responseMd(data) {
  * 项目 -> Markdown 文档。
  * 结构与控制台里的展示顺序一致：目录分组，每个接口给方法、URL、说明、参数、Body、响应。
  */
-export function projectToMarkdown(target, { projectId, projectName } = {}) {
+export function projectToMarkdown(target, { projectId, projectName, targetIds } = {}) {
   const meta = readProjectMeta(target.dataRoot, projectId) || {};
   const name = projectName || meta.name || 'API 文档';
   const items = listApiItems(target);
-  const apis = collectHttpApis(target);
+  const apis = collectHttpApis(target, { targetIds });
   const base = projectBaseUrl(target);
 
   const lines = [];
@@ -1024,8 +1045,8 @@ const DOC_STYLE = `
 `;
 
 /** 项目 -> 自包含 HTML 文档（可离线打开，也可直接打印为 PDF） */
-export function projectToHtml(target, { projectId, projectName } = {}) {
-  const { name, content } = projectToMarkdown(target, { projectId, projectName });
+export function projectToHtml(target, { projectId, projectName, targetIds } = {}) {
+  const { name, content } = projectToMarkdown(target, { projectId, projectName, targetIds });
   const body = markdownToHtml(content);
   const html = `<!doctype html>
 <html lang="zh-CN">
@@ -1052,8 +1073,8 @@ ${body}
  * 零依赖实现成本高且难以在本机验证渲染效果；.doc 在 Word / WPS
  * 都能直接打开，排版保真足够满足"发给非开发同学看"的场景。
  */
-export function projectToWord(target, { projectId, projectName } = {}) {
-  const { name, content } = projectToMarkdown(target, { projectId, projectName });
+export function projectToWord(target, { projectId, projectName, targetIds } = {}) {
+  const { name, content } = projectToMarkdown(target, { projectId, projectName, targetIds });
   const body = markdownToHtml(content);
   const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office"
 xmlns:w="urn:schemas-microsoft-com:office:word"

@@ -40,8 +40,17 @@ const AUTH_TYPES = [
   ['basic', 'Basic Auth'],
   ['bearer', 'Bearer Token'],
   ['kv', 'API Key (KV)'],
-  ['oauth2', 'OAuth 2.0']
+  ['oauth2', 'OAuth 2.0'],
+  ['digest', 'Digest Auth'],
+  ['oauth1', 'OAuth 1.0'],
+  ['hawk', 'Hawk'],
+  ['awsv4', 'AWS Signature'],
+  ['ntlm', 'NTLM (Beta)'],
+  ['edgegrid', 'Akamai EdgeGrid']
 ];
+
+/** 执行层（src/exec/auth.js）目前真正能用的类型，其余只占位展示 */
+const AUTH_RUNTIME_SUPPORTED = new Set(['noauth', 'inherit', 'basic', 'bearer', 'kv', 'apikey', 'oauth2']);
 const FIELD_TYPES = ['String', 'Integer', 'Number', 'Boolean', 'Array', 'Object', 'File'];
 
 /* ---------------- 工具 ---------------- */
@@ -98,14 +107,88 @@ function input(value, onChange, { type = 'text', placeholder = '', readonly = fa
   });
 }
 
-function textarea(value, onChange, { rows = 6, placeholder = '', mono = true } = {}) {
-  return h('textarea', {
+/**
+ * 多行文本输入。
+ *
+ * toolbar 控制是否带「美化 / 压缩 / 格式化 XML」工具条：
+ *  - 'json'：美化 + 压缩
+ *  - 'xml' ：格式化 XML
+ *  - 'code'：美化 + 压缩 + 格式化 XML（按内容判断可用性）
+ *  - false ：纯 textarea
+ *
+ * 格式化只改文本、不改语义：JSON 走 parse→stringify，XML/HTML 复用 prettyMarkup。
+ * 非法内容不静默处理，直接 toast 报错并保留原文。
+ */
+function textarea(value, onChange, { rows = 6, placeholder = '', mono = true, readonly = false, toolbar = false, label = '' } = {}) {
+  const el = h('textarea', {
     rows,
     placeholder,
     class: mono ? 'mono-input' : '',
     style: `min-height:${rows * 22}px`,
+    ...(readonly ? { readonly: true } : {}),
     oninput: (e) => onChange(e.target.value)
   }, value ?? '');
+
+  if (!toolbar) return el;
+
+  const kinds = toolbar === 'json' ? ['json'] : toolbar === 'xml' ? ['xml'] : ['json', 'xml'];
+  const stat = h('span', { class: 'hint code-editor-stat' });
+
+  const refreshStat = () => {
+    const text = el.value;
+    const lines = text ? text.split('\n').length : 0;
+    const bytes = new TextEncoder().encode(text).length;
+    stat.textContent = `${lines} 行 · ${bytes} B`;
+  };
+
+  const applyJson = (pretty) => {
+    const raw = String(el.value || '').trim();
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw);
+      const next = pretty ? JSON.stringify(parsed, null, 2) : JSON.stringify(parsed);
+      el.value = next;
+      onChange(next);
+      refreshStat();
+    } catch (err) {
+      toast(`JSON 格式错误，无法${pretty ? '美化' : '压缩'}：${err.message}`, true);
+    }
+  };
+
+  const formatXml = () => {
+    const raw = String(el.value || '').trim();
+    if (!raw) return;
+    const next = prettyMarkup(raw);
+    el.value = next;
+    onChange(next);
+    refreshStat();
+  };
+
+  const buttons = [];
+  if (kinds.includes('json')) {
+    buttons.push(h('button', { class: 'small', title: '转成缩进多行', onclick: () => applyJson(true) }, '美化'));
+    buttons.push(h('button', { class: 'small', title: '压成单行', onclick: () => applyJson(false) }, '压缩'));
+  }
+  if (kinds.includes('xml')) {
+    buttons.push(h('button', { class: 'small', title: '按标签层级缩进', onclick: formatXml }, '格式化 XML'));
+  }
+
+  refreshStat();
+  // 外部改动（例如切换接口后重绘）不需要额外同步：每次都是新建元素
+
+  return h(
+    'div',
+    { class: 'code-editor' },
+    h(
+      'div',
+      { class: 'code-editor-bar' },
+      label ? h('span', { class: 'code-editor-title' }, label) : null,
+      h('span', { class: 'spacer-flex' }),
+      ...buttons,
+      stat
+    ),
+    el
+  );
 }
 
 function paramId() {
@@ -127,6 +210,23 @@ function newParam(overrides = {}) {
 
 /* ---------------- 参数表 ---------------- */
 
+const CONTENT_TYPE_OPTIONS = [
+  ['auto', '自动 (content-type)'],
+  ['application/json', 'application/json'],
+  ['text/plain', 'text/plain'],
+  ['application/xml', 'application/xml'],
+  ['application/octet-stream', 'application/octet-stream'],
+  ['image/png', 'image/png'],
+  ['image/jpeg', 'image/jpeg']
+];
+
+/**
+ * 参数表。
+ *
+ * withFileType 为 true 时用于 form-data：值列里内嵌类型下拉与（File 时的）文件选择，
+ * 并额外给出「内容类型」列——列宽与 .param-head 保持一致，表头与数据行才能对齐。
+ * 其它调用方（urlencoded / 全局参数）不传该选项，仍用原来的 6 列布局。
+ */
 function paramTable(list, onChange, { withFileType = false, addLabel = '添加参数' } = {}) {
   const rows = [];
 
@@ -134,11 +234,67 @@ function paramTable(list, onChange, { withFileType = false, addLabel = '添加�
 
   const render = () => {
     rows.length = 0;
-    list.forEach((p, index) => {
+
+    if (withFileType) {
       rows.push(
         h(
           'div',
-          { class: 'param-row' },
+          { class: 'param-head' },
+          h('span', {}),
+          h('span', {}, '参数名'),
+          h('span', {}, '参数值'),
+          h('span', {}, '内容类型'),
+          h('span', {}, '描述'),
+          h('span', {})
+        )
+      );
+    }
+
+    list.forEach((p, index) => {
+      const isFile = String(p.field_type || '').toLowerCase() === 'file';
+
+      const valueCell = withFileType
+        ? h(
+            'div',
+            { class: 'param-value-cell' },
+            select(
+              FIELD_TYPES.map((t) => [t, t]),
+              p.field_type || 'String',
+              (v) => {
+                p.field_type = v;
+                commit();
+                render();
+              },
+              { class: 'param-type' }
+            ),
+            isFile
+              ? fileValueCell(p, commit)
+              : h('input', {
+                  type: 'text',
+                  class: 'mono-input',
+                  placeholder: 'value',
+                  value: p.value ?? '',
+                  oninput: (e) => {
+                    p.value = e.target.value;
+                    commit();
+                  }
+                })
+          )
+        : h('input', {
+            type: 'text',
+            class: 'mono-input',
+            placeholder: 'value',
+            value: p.value ?? '',
+            oninput: (e) => {
+              p.value = e.target.value;
+              commit();
+            }
+          });
+
+      rows.push(
+        h(
+          'div',
+          { class: withFileType ? 'param-row with-file' : 'param-row' },
           h('input', {
             type: 'checkbox',
             checked: Number(p.is_checked) !== 0 && Number(p.is_checked) !== -1,
@@ -157,26 +313,27 @@ function paramTable(list, onChange, { withFileType = false, addLabel = '添加�
               commit();
             }
           }),
-          h('input', {
-            type: 'text',
-            class: 'mono-input',
-            placeholder: 'value',
-            value: p.value ?? '',
-            oninput: (e) => {
-              p.value = e.target.value;
-              commit();
-            }
-          }),
-          select(
-            FIELD_TYPES.map((t) => [t, t]),
-            p.field_type || 'String',
-            (v) => {
-              p.field_type = v;
-              commit();
-              render();
-            },
-            { class: 'param-type' }
-          ),
+          valueCell,
+          withFileType
+            ? select(
+                CONTENT_TYPE_OPTIONS,
+                p.content_type || 'auto',
+                (v) => {
+                  p.content_type = v;
+                  commit();
+                },
+                { class: 'param-ctype' }
+              )
+            : select(
+                FIELD_TYPES.map((t) => [t, t]),
+                p.field_type || 'String',
+                (v) => {
+                  p.field_type = v;
+                  commit();
+                  render();
+                },
+                { class: 'param-type' }
+              ),
           h('input', {
             type: 'text',
             placeholder: '说明',
@@ -213,7 +370,7 @@ function paramTable(list, onChange, { withFileType = false, addLabel = '添加�
         {
           class: 'small param-add',
           onclick: () => {
-            list.push(newParam());
+            list.push(newParam({ ...(withFileType ? { content_type: 'auto' } : {}) }));
             commit();
             render();
           }
@@ -229,6 +386,56 @@ function paramTable(list, onChange, { withFileType = false, addLabel = '添加�
   return container;
 }
 
+/** File 类型的值单元格：显示文件名，桌面端可点按钮选文件 */
+function fileValueCell(p, commit) {
+  const nameEl = h(
+    'span',
+    { class: 'param-file-name mono', title: p.value || '' },
+    p.value ? String(p.value).split(/[\\/]/).pop() : '未选择文件'
+  );
+
+  const pick = window.apimcpShell?.pickFile
+    ? h(
+        'button',
+        {
+          class: 'small',
+          onclick: async () => {
+            try {
+              const picked = await window.apimcpShell.pickFile();
+              if (!picked) return;
+              p.value = picked.path || '';
+              nameEl.textContent = picked.name || String(picked.path || '').split(/[\\/]/).pop();
+              nameEl.title = p.value;
+              commit();
+            } catch (err) {
+              toast(err.message, true);
+            }
+          }
+        },
+        '选择文件'
+      )
+    : null;
+
+  return h(
+    'div',
+    { class: 'param-file-cell' },
+    nameEl,
+    pick ||
+      h('input', {
+        type: 'text',
+        class: 'mono-input',
+        placeholder: '文件路径',
+        value: p.value ?? '',
+        oninput: (e) => {
+          p.value = e.target.value;
+          nameEl.textContent = e.target.value ? e.target.value.split(/[\\/]/).pop() : '未选择文件';
+          nameEl.title = e.target.value;
+          commit();
+        }
+      })
+  );
+}
+
 /* ---------------- 编辑器状态 ---------------- */
 
 const editor = {
@@ -241,10 +448,23 @@ const editor = {
   caseDirty: false, // case 域（data.cases）
   mockDirty: false, // mock 域（data.mock）
   activeTab: 'basic',
-  activeMode: 'design',
-  /** 目录编辑器的子页签（基础 / 参数 / Body / 鉴权 / 脚本） */
-  folderTab: 'basic',
+  /** 请求构建区当前页签（header/query/path/body/auth/cookie/pre/post） */
+  wsTab: 'header',
+  /** 响应区当前页签（body/headers/cookies/example/request/console） */
   debugTab: 'body',
+  activeMode: 'design',
+  /** 目录编辑器的子页签（目录设置 / 目录参数 / 接口列表） */
+  folderTab: 'basic',
+  /** 响应示例页签的当前示例下标与编辑态 */
+  exampleIndex: 0,
+  exampleEditing: false,
+  /**
+   * 顶部多标签页。每一项是「打开着的接口」的快照，
+   * 当前编辑中的那一个在 editor 顶层字段里（data / dirty / activeMode ...）。
+   * 仅内存保存：刷新页面后清空，避免保留已删除对象的 id。
+   */
+  tabs: [],
+  activeTabId: null,
   // 响应体查看状态
   debugView: 'pretty',
   debugFormat: 'auto',
@@ -286,8 +506,10 @@ function discardUnsaved() {
   syncDirtyBadge();
 }
 
+/** 汇总所有标签页的未保存改动：离开页面 / 切换项目的守卫靠它 */
 function hasUnsaved() {
-  return Boolean(editor.dirty || editor.caseDirty || editor.mockDirty);
+  if (editor.dirty || editor.caseDirty || editor.mockDirty) return true;
+  return anyTabDirty();
 }
 
 function isDirty(scope = 'design') {
@@ -311,6 +533,399 @@ function syncDirtyBadge() {
   } else {
     badge.style.display = 'none';
   }
+}
+
+/* ---------------- 多标签页 ---------------- */
+
+const MAX_TABS = 12;
+
+/** 把当前编辑状态回写进它对应的 tab 快照 */
+function snapshotActiveTab() {
+  if (!editor.activeTabId) return;
+  const tab = editor.tabs.find((t) => String(t.targetId) === String(editor.activeTabId));
+  if (!tab) return;
+  tab.data = editor.data;
+  tab.name = editor.data?.name || tab.name;
+  tab.method = editor.data?.method || tab.method;
+  tab.targetType = editor.targetType;
+  tab.indexMeta = editor.indexMeta;
+  tab.mode = editor.activeMode;
+  tab.dirty = editor.dirty;
+  tab.caseDirty = editor.caseDirty;
+  tab.mockDirty = editor.mockDirty;
+}
+
+/** 把 tab 快照装回当前编辑状态 */
+function restoreTab(tab) {
+  editor.selectedId = tab.targetId;
+  editor.data = tab.data;
+  editor.targetType = tab.targetType;
+  editor.indexMeta = tab.indexMeta;
+  editor.activeMode = tab.mode || 'design';
+  editor.dirty = Boolean(tab.dirty);
+  editor.caseDirty = Boolean(tab.caseDirty);
+  editor.mockDirty = Boolean(tab.mockDirty);
+  editor.activeTabId = tab.targetId;
+}
+
+/** 汇总所有 tab 的脏标记：beforeunload 与外部跳转守卫靠它 */
+function anyTabDirty() {
+  if (editor.dirty || editor.caseDirty || editor.mockDirty) return true;
+  return editor.tabs.some((t) => t.dirty || t.caseDirty || t.mockDirty);
+}
+
+/** 打开（或激活）一个接口 tab */
+async function openTab(projectId, targetId, { activate = true } = {}) {
+  const key = String(targetId);
+
+  const existing = editor.tabs.find((t) => String(t.targetId) === key);
+  if (existing) {
+    if (activate) {
+      snapshotActiveTab();
+      restoreTab(existing);
+      rerenderTree();
+      rerenderPane();
+      renderTabBar();
+    }
+    return existing;
+  }
+
+  if (editor.tabs.length >= MAX_TABS) {
+    toast(`最多同时打开 ${MAX_TABS} 个标签页，请先关闭一些`, true);
+    return null;
+  }
+
+  // 先按原来的单文档方式加载，再把结果封成新 tab
+  snapshotActiveTab();
+  await loadApi(projectId, targetId);
+
+  const tab = {
+    targetId,
+    name: editor.data?.name || targetId,
+    method: editor.data?.method || '',
+    targetType: editor.targetType,
+    data: editor.data,
+    indexMeta: editor.indexMeta,
+    mode: editor.activeMode,
+    dirty: false,
+    caseDirty: false,
+    mockDirty: false
+  };
+  editor.tabs.push(tab);
+  if (activate) editor.activeTabId = key;
+  renderTabBar();
+  return tab;
+}
+
+/**
+ * 批量关闭标签页。
+ *
+ * 先 snapshotActiveTab() 把当前编辑状态落进快照，脏标记才不会看漏；
+ * 普通关闭对所有有未保存改动的目标只弹一次 confirm，force 则完全跳过确认
+ * （用于「强制关闭」系列菜单项）。
+ */
+function closeTabsByIds(ids, { force = false } = {}) {
+  snapshotActiveTab();
+  const keys = new Set(ids.map((id) => String(id)));
+  const targets = editor.tabs.filter((t) => keys.has(String(t.targetId)));
+  if (targets.length === 0) return;
+
+  if (!force) {
+    const dirtyTabs = targets.filter((t) => t.dirty || t.caseDirty || t.mockDirty);
+    if (dirtyTabs.length > 0) {
+      const message =
+        dirtyTabs.length === 1
+          ? `「${dirtyTabs[0].name}」有未保存的修改，确定关闭？`
+          : `${dirtyTabs.length} 个标签页有未保存的修改（${dirtyTabs.map((t) => t.name).join('、')}），确定关闭？`;
+      if (!confirm(message)) return;
+    }
+  }
+
+  // 记住活动 tab 在剩余列表里的落点，关完激活相邻的那个
+  const activeKey = String(editor.activeTabId || '');
+  const activeIndex = editor.tabs.findIndex((t) => String(t.targetId) === activeKey);
+  const closingActive = keys.has(activeKey);
+
+  editor.tabs = editor.tabs.filter((t) => !keys.has(String(t.targetId)));
+
+  if (!closingActive) {
+    renderTabBar();
+    return;
+  }
+
+  const next = editor.tabs[Math.min(activeIndex, editor.tabs.length - 1)] || null;
+  if (next) {
+    restoreTab(next);
+    rerenderTree();
+    rerenderPane();
+  } else {
+    editor.activeTabId = null;
+    editor.selectedId = null;
+    editor.data = null;
+    editor.activeMode = 'design';
+    rerenderTree();
+    rerenderPane();
+  }
+  renderTabBar();
+}
+
+/** 关闭单个 tab；当前 tab 关闭后激活相邻的一个 */
+function closeTab(targetId) {
+  closeTabsByIds([targetId]);
+}
+
+function renderTabBar() {
+  const host = document.getElementById('editor-tabs');
+  if (!host) return;
+
+  if (editor.tabs.length === 0) {
+    host.replaceChildren();
+    host.style.display = 'none';
+    return;
+  }
+  host.style.display = '';
+
+  const tabsNode = h(
+    'div',
+    { class: 'editor-tabs-list' },
+    ...editor.tabs.map((tab) => {
+      const isActive = String(tab.targetId) === String(editor.activeTabId);
+      const dirty = isActive
+        ? editor.dirty || editor.caseDirty || editor.mockDirty
+        : tab.dirty || tab.caseDirty || tab.mockDirty;
+      return h(
+        'div',
+        {
+          class: `editor-tab${isActive ? ' active' : ''}`,
+          title: tab.name,
+          onclick: () => {
+            if (isActive) return;
+            snapshotActiveTab();
+            const target = editor.tabs.find((t) => String(t.targetId) === String(tab.targetId));
+            if (!target) return;
+            restoreTab(target);
+            rerenderTree();
+            rerenderPane();
+            renderTabBar();
+          },
+          oncontextmenu: (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            openTabContextMenu(e, tab);
+          }
+        },
+        tab.method ? h('span', { class: `method ${String(tab.method).toUpperCase()}` }, tab.method) : null,
+        h('span', { class: 'editor-tab-name' }, tab.name),
+        dirty ? h('span', { class: 'editor-tab-dot', title: '未保存' }) : null,
+        h(
+          'span',
+          {
+            class: 'editor-tab-close',
+            title: '关闭',
+            onclick: (e) => {
+              e.stopPropagation();
+              closeTab(tab.targetId);
+            }
+          },
+          '×'
+        )
+      );
+    })
+  );
+
+  // 右端「...」：批量关闭 / 保存，标签很多时不用一个个点
+  const moreBtn = h(
+    'button',
+    {
+      class: 'editor-tabs-more',
+      title: '标签页操作',
+      onclick: (e) => {
+        e.stopPropagation();
+        openTabBulkMenu(moreBtn);
+      },
+      oncontextmenu: (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openTabBulkMenu(moreBtn);
+      }
+    },
+    '⋯'
+  );
+
+  host.replaceChildren(tabsNode, moreBtn);
+}
+
+/* ---------------- 标签页右键菜单 ---------------- */
+
+/** 单个标签页的右键菜单 */
+function openTabContextMenu(e, tab) {
+  const key = String(tab.targetId);
+  const index = editor.tabs.findIndex((t) => String(t.targetId) === key);
+  const isApi = tab.targetType === 'api';
+  const items = [];
+
+  items.push(ctxMenuItem('关闭', () => closeTabsByIds([key], { force: true }), { icon: 'close' }));
+
+  const others = editor.tabs.filter((t) => String(t.targetId) !== key).map((t) => String(t.targetId));
+  items.push(
+    ctxMenuItem('关闭其他', () => closeTabsByIds(others), {
+      icon: 'close',
+      disabled: others.length === 0,
+      hint: '当前只有一个标签页'
+    })
+  );
+
+  const right = editor.tabs.slice(index + 1).map((t) => String(t.targetId));
+  items.push(
+    ctxMenuItem('关闭右侧', () => closeTabsByIds(right), {
+      icon: 'right',
+      disabled: right.length === 0,
+      hint: '当前标签页已在最右'
+    })
+  );
+
+  items.push(h('div', { class: 'ctx-menu-sep' }));
+  items.push(ctxMenuItem('复制名称', () => copyTabName(tab), { icon: 'copy' }));
+  items.push(
+    ctxMenuItem('复制接口 URL', () => copyTabUrl(tab), {
+      icon: 'copy',
+      disabled: !tab.indexMeta?.url,
+      hint: '目录与文档没有接口 URL'
+    })
+  );
+
+  items.push(
+    ctxSubMenu(
+      '复制为 cURL',
+      () => [
+        ctxMenuItem('Bash', () => copyTabAsCurl(tab, 'bash'), { icon: 'curl' }),
+        ctxMenuItem('CMD', () => copyTabAsCurl(tab, 'cmd'), { icon: 'curl' })
+      ],
+      { icon: 'curl', disabled: !isApi }
+    )
+  );
+
+  openContextMenu(e.clientX, e.clientY, items);
+}
+
+/** 标签栏右端「...」的批量菜单 */
+function openTabBulkMenu(anchor) {
+  const rect = anchor.getBoundingClientRect();
+  const allIds = editor.tabs.map((t) => String(t.targetId));
+  const activeKey = String(editor.activeTabId || '');
+  const others = allIds.filter((id) => id !== activeKey);
+  const items = [];
+
+  items.push(ctxMenuItem('关闭所有标签', () => closeTabsByIds(allIds), { icon: 'close', disabled: allIds.length === 0 }));
+  items.push(
+    ctxMenuItem('强制关闭所有标签', () => closeTabsByIds(allIds, { force: true }), {
+      icon: 'close',
+      disabled: allIds.length === 0,
+      hint: '跳过未保存确认'
+    })
+  );
+  items.push(ctxMenuItem('关闭其他标签', () => closeTabsByIds(others), { icon: 'close', disabled: others.length === 0 }));
+  items.push(
+    ctxMenuItem('强制关闭其他所有标签', () => closeTabsByIds(others, { force: true }), {
+      icon: 'close',
+      disabled: others.length === 0,
+      hint: '跳过未保存确认'
+    })
+  );
+
+  items.push(h('div', { class: 'ctx-menu-sep' }));
+  items.push(ctxMenuItem('保存所有标签', () => saveAllTabs(), { icon: 'save' }));
+
+  // 从按钮下方弹出；用 openContextMenu 保证收边与关闭逻辑一致
+  openContextMenu(rect.left, rect.bottom + 4, items);
+}
+
+async function copyTabName(tab) {
+  const res = await copyText(tab.name || '');
+  if (!res.ok) {
+    toastCopyFailed(res.error);
+    return;
+  }
+  toast('已复制标签名称');
+}
+
+async function copyTabUrl(tab) {
+  const url = tab.indexMeta?.url || '';
+  if (!url) {
+    toast('该标签没有接口 URL', true);
+    return;
+  }
+  const res = await copyText(url);
+  if (!res.ok) {
+    toastCopyFailed(res.error);
+    return;
+  }
+  toast('已复制接口 URL');
+}
+
+/** 非活动标签也能生成 cURL：直接用它自己的快照，不依赖编辑器当前内容 */
+async function copyTabAsCurl(tab, dialect) {
+  const isActive = String(tab.targetId) === String(editor.activeTabId);
+  if (isActive) snapshotActiveTab();
+  const node = {
+    target_id: tab.targetId,
+    target_type: tab.targetType,
+    method: tab.method,
+    url: tab.indexMeta?.url || tab.data?.url || '',
+    name: tab.name
+  };
+  await copyDefinitionAsCurl(node, dialect, tab.data);
+}
+
+/**
+ * 保存所有标签的设计域。
+ *
+ * 活动 tab 走 saveActiveMode（会连带保存用例 / Mock 草稿），
+ * 其余 tab 直接用自己的 data 快照 PUT 落库——它们没有内存中的用例/Mock 草稿。
+ */
+async function saveAllTabs() {
+  snapshotActiveTab();
+  const activeKey = String(editor.activeTabId || '');
+  // 目录也有设计域（名称 / 描述 / 目录参数），一并保存
+  const targets = editor.tabs.filter(
+    (t) => t.targetType === 'api' || t.targetType === 'doc' || t.targetType === 'folder'
+  );
+  let ok = 0;
+  const failed = [];
+  let pendingAux = 0;
+
+  for (const tab of targets) {
+    if (String(tab.targetId) === activeKey) continue;
+    if (tab.caseDirty || tab.mockDirty) pendingAux += 1;
+    try {
+      await api.put(`/projects/${editor.projectId}/apis/${tab.targetId}`, {
+        data: tab.data,
+        preserve_aux: true
+      });
+      tab.dirty = false;
+      ok += 1;
+    } catch (err) {
+      failed.push(`${tab.name}：${err.message}`);
+    }
+  }
+
+  // 活动 tab 交给现有链路，保留它对用例 / Mock 的保存能力。
+  // 压测页签没有可保存内容（saveActiveMode 只弹提示），跳过以免白弹一次 toast。
+  if (editor.activeTabId && (editor.activeMode || 'design') !== 'stress') {
+    try {
+      await saveActiveMode(window.__designRefresh);
+      ok += 1;
+    } catch (err) {
+      failed.push(`${editor.data?.name || editor.activeTabId}：${err.message}`);
+    }
+  }
+
+  renderTabBar();
+  if (failed.length > 0) {
+    toast(`保存完成 ${ok} 个，失败 ${failed.length} 个（${failed[0]}）`, true);
+    return;
+  }
+  toast(pendingAux > 0 ? `已保存 ${ok} 个标签；${pendingAux} 个标签的用例/Mock 草稿需切换过去单独保存` : `已保存 ${ok} 个标签`);
 }
 
 /* ---------------- 数据加载 ---------------- */
@@ -758,65 +1373,6 @@ function metaBar() {
   );
 }
 
-function tabBasic() {
-  const d = editor.data;
-  const readOnlyType = editor.targetType !== 'api';
-
-  const folderOptions = [['0', '根目录']];
-  for (const item of editor.apiIndex) {
-    if (item.target_type !== 'folder') continue;
-    if (item.target_id === editor.selectedId) continue;
-    folderOptions.push([item.target_id, item.name || item.target_id]);
-  }
-
-  return h(
-    'div',
-    { class: 'form-grid' },
-    field('名称', input(d.name, (v) => {
-      d.name = v;
-      markDirty();
-    }, { placeholder: '接口名称' })),
-    readOnlyType
-      ? null
-      : field('方法', select(METHODS.map((m) => [m, m]), String(d.method || 'GET').toUpperCase(), (v) => {
-          d.method = v;
-          markDirty();
-        })),
-    field(
-      'URL',
-      input(d.url, (v) => {
-        d.url = v;
-        markDirty();
-      }, { placeholder: 'https://api.example.com/users 或 {{base}}/users', mono: true }),
-      '支持 {{变量名}} 引用环境变量与环境服务地址'
-    ),
-    field(
-      '所属目录',
-      select(folderOptions, String(d.parent_id || '0'), (v) => {
-        d.parent_id = v;
-        markDirty();
-      })
-    ),
-    h(
-      'div',
-      { class: 'form-row full' },
-      h('label', { class: 'form-label' }, '描述'),
-      h(
-        'div',
-        { class: 'form-control' },
-        textarea(
-          d.description || '',
-          (v) => {
-            d.description = v;
-            markDirty();
-          },
-          { rows: 3, mono: false, placeholder: '接口用途说明' }
-        )
-      )
-    )
-  );
-}
-
 /* ---------------- 页签：参数 ---------------- */
 
 function paramSection(title, holder, key, onChange = markDirty) {
@@ -825,7 +1381,21 @@ function paramSection(title, holder, key, onChange = markDirty) {
   return h(
     'div',
     { class: 'param-section' },
-    h('div', { class: 'param-section-title' }, title, h('span', { class: 'tab-badge' }, holder.parameter.length)),
+    h(
+      'div',
+      { class: 'param-section-title' },
+      title,
+      h('span', { class: 'tab-badge' }, holder.parameter.length),
+      h(
+        'button',
+        {
+          class: 'small param-bulk-btn',
+          title: '按文本批量导入参数',
+          onclick: () => openBulkEdit(holder.parameter, onChange, title)
+        },
+        '批量编辑'
+      )
+    ),
     paramTable(holder.parameter, (next) => {
       holder.parameter = next;
       onChange();
@@ -970,7 +1540,12 @@ function tabBody(body = editor.data.request.body, onChange = markDirty, opts = {
                 onChange();
                 if (mode === 'json') updateJsonHint(v);
               },
-              { rows: 14, placeholder: mode === 'json' ? '{\n  "key": "value"\n}' : '' }
+              {
+                rows: 14,
+                placeholder: mode === 'json' ? '{\n  "key": "value"\n}' : '',
+                // JSON 给美化/压缩，XML/HTML 给标签缩进，其余纯文本不给工具条
+                toolbar: mode === 'json' ? 'json' : mode === 'xml' || mode === 'html' ? 'xml' : false
+              }
             ),
             h('div', { id: 'json-hint' }, jsonHint)
           )
@@ -1177,6 +1752,19 @@ function tabAuth(request = editor.data.request, onChange = markDirty) {
     );
   } else if (type === 'inherit') {
     detail = h('div', { class: 'form-hint' }, '使用项目级 global_params.json 中定义的默认鉴权');
+  } else if (!AUTH_RUNTIME_SUPPORTED.has(type)) {
+    // 对齐 Apipost 的类型清单，但执行层尚未实现签名算法：明确告知，避免误以为已生效
+    detail = h(
+      'div',
+      { class: 'notice warn' },
+      h('span', {}, '!'),
+      h(
+        'div',
+        {},
+        h('div', {}, `「${AUTH_TYPES.find(([k]) => k === type)?.[1] || type}」尚未在执行层实现，发送时不会自动加签名。`),
+        h('div', { class: 'hint mt8' }, '可先用「预执行」脚本手工拼装 Authorization / 签名头，或改用 Bearer / Basic / API Key。')
+      )
+    );
   } else {
     detail = h('div', { class: 'form-hint' }, '该接口不携带鉴权信息');
   }
@@ -1605,18 +2193,10 @@ function tabResponse() {
 
 /* ---------------- 编辑器外壳 ---------------- */
 
-const TABS = [
-  ['basic', '基础'],
-  ['params', '参数'],
-  ['body', 'Body'],
-  ['auth', '鉴权'],
-  ['scripts', '脚本'],
-  ['response', '响应']
-];
-
 let paneHost = null;
 
 function rerenderPane() {
+  window.__syncPaneHostMode?.();
   if (!paneHost) return;
   paneHost.replaceChildren(buildPane());
 }
@@ -2042,7 +2622,6 @@ const PROTOCOLS = [
   ['http/2', 'http/2']
 ];
 
-let lastResponse = null;
 let sending = false;
 
 function requestBar({ readonly = false } = {}) {
@@ -2077,9 +2656,17 @@ function requestBar({ readonly = false } = {}) {
     markDirty();
   }, { class: 'req-protocol', disabled: readonly });
 
-  // 只读模式（压测 / Mock 页签）不提供发送能力，避免改动设计数据
+  // 只读模式（压测 / Mock 页签）不提供发送能力，避免改动设计数据；
+  // 保存按钮跟着请求行走，压测没有可保存配置，这里不渲染。
   if (readonly) {
-    return h('div', { class: 'request-bar readonly' }, methodSelect, urlInput, protocolSelect);
+    return h(
+      'div',
+      { class: 'request-bar readonly' },
+      methodSelect,
+      urlInput,
+      protocolSelect,
+      editor.activeMode === 'stress' ? null : saveSplit()
+    );
   }
 
   const sendMain = h(
@@ -2174,7 +2761,9 @@ function requestBar({ readonly = false } = {}) {
     urlInput,
     protocolSelect,
     split,
-    cancelBtn
+    cancelBtn,
+    // 保存从页签行下移到这里，占用原 curl 导入的位置
+    saveSplit()
   );
 }
 
@@ -2200,32 +2789,11 @@ async function doSend(saveResponse) {
     }
 
     const res = await api.post(`/projects/${editor.projectId}/apis/${editor.selectedId}/send`, {}, { signal });
-    lastResponse = res;
+    // 响应进右侧常驻响应区（按接口缓存，切回来还在）
+    window.ApiWorkspace?.setResponse(editor.selectedId, res);
 
     if (saveResponse && res.response) {
-      const resp = ensureShape(editor.data).response;
-      if (!Array.isArray(resp.example) || resp.example.length === 0) {
-        resp.example = [
-          {
-            example_id: `${Date.now().toString(16)}`,
-            expect: {
-              code: String(res.response.status || 200),
-              content_type: 'json',
-              is_default: 1,
-              mock: '',
-              name: '成功',
-              schema: { type: 'object', properties: {} },
-              verify_type: 'schema'
-            },
-            raw: '',
-            raw_parameter: []
-          }
-        ];
-      }
-      resp.example[0].raw = res.response.body || '';
-      resp.example[0].expect.code = String(res.response.status || 200);
-      markDirty();
-      await saveCurrent(window.__designRefresh);
+      saveResponseToExample(res);
       toast('已保存响应到示例，并同步保存接口');
     } else {
       toast(res.status === 'passed' ? `发送成功 · ${res.status_code}` : `发送完成（${res.status_code || '失败'}）`);
@@ -2233,18 +2801,60 @@ async function doSend(saveResponse) {
   } catch (err) {
     const aborted = err?.name === 'AbortError' || /abort/i.test(String(err?.message || ''));
     if (aborted) {
-      lastResponse = null;
+      window.ApiWorkspace?.clearResponse(editor.selectedId);
       toast('已取消发送');
     } else {
-      lastResponse = { error: err.message };
+      window.ApiWorkspace?.setResponse(editor.selectedId, { error: err.message });
       toast(`发送失败：${err.message}`, true);
     }
   } finally {
     sending = false;
     sendAbort = null;
-    // 切到调试模式看结果
-    if (editor.activeMode !== 'debug') editor.activeMode = 'debug';
     rerenderPane();
+  }
+}
+
+/** 把当前响应写回期望的第一个示例，并保存接口 */
+async function saveResponseToExample(res) {
+  if (!res?.response) return false;
+  const resp = ensureShape(editor.data).response;
+  if (!Array.isArray(resp.example) || resp.example.length === 0) {
+    resp.example = [
+      {
+        example_id: `${Date.now().toString(16)}`,
+        expect: {
+          code: String(res.response.status || 200),
+          content_type: 'json',
+          is_default: 1,
+          mock: '',
+          name: '成功',
+          schema: { type: 'object', properties: {} },
+          verify_type: 'schema'
+        },
+        raw: '',
+        raw_parameter: []
+      }
+    ];
+  }
+  resp.example[0].raw = res.response.body || '';
+  resp.example[0].expect.code = String(res.response.status || 200);
+  markDirty();
+  await saveCurrent(window.__designRefresh);
+  return true;
+}
+
+/** 响应区「保存为示例」按钮入口：用当前接口缓存的响应 */
+async function saveAsExample() {
+  const res = window.ApiWorkspace?.getResponse(editor.selectedId);
+  if (!res?.response) {
+    toast('还没有可保存的响应，请先发送', true);
+    return;
+  }
+  try {
+    await saveResponseToExample(res);
+    toast('已保存响应到示例，并同步保存接口');
+  } catch (err) {
+    toast(err.message, true);
   }
 }
 
@@ -2742,287 +3352,7 @@ function buildResponseBody(resp, envelope) {
   return h('div', { class: 'response-body-wrap' }, toolbar, h('div', { class: 'response-body-content' }, content));
 }
 
-function debugPanel() {
-  if (!lastResponse) {
-    return h(
-      'div',
-      { class: 'debug-empty' },
-      h('div', { class: 'debug-empty-icon' }, '🚀'),
-      h('div', {}, '还没发送请求'),
-      h('div', { class: 'hint' }, '点上方「发送」按钮，响应会显示在这里')
-    );
-  }
-
-  if (lastResponse.error) {
-    return h('div', { class: 'debug-error' }, `发送失败：${lastResponse.error}`);
-  }
-
-  const resp = lastResponse.response;
-  if (!resp) {
-    return h('div', { class: 'debug-error' }, lastResponse.error || '没有响应');
-  }
-
-  // 合并二进制字段（在 envelope 顶层）到 response 对象，供渲染与下载使用
-  const view = {
-    ...resp,
-    content_type: resp.content_type || lastResponse.content_type || '',
-    is_binary: resp.is_binary !== undefined ? resp.is_binary : Boolean(lastResponse.is_binary),
-    body_base64: lastResponse.body_base64 || resp.body_base64 || null,
-    too_large_for_base64: Boolean(lastResponse.too_large_for_base64 || resp.too_large_for_base64)
-  };
-
-  const status = Number(resp.status) || 0;
-  const statusCls = status >= 500 ? 'err' : status >= 400 ? 'warn' : status >= 200 && status < 300 ? 'ok' : '';
-
-  // 未脱敏的完整详情（本地即时返回）；旧服务没有该项时回落到脱敏字段
-  const live = lastResponse.live_detail || null;
-  const liveReq = live?.request || lastResponse.request || null;
-  const liveResp = live?.response || null;
-
-  const meta = h(
-    'div',
-    { class: 'response-meta' },
-    h('span', { class: `tag ${statusCls}` }, `${status} ${resp.status_text || ''}`.trim()),
-    h('span', { class: 'hint' }, `${liveResp?.protocol || lastResponse.protocol || 'HTTP/1.1'}`),
-    h('span', { class: 'hint' }, `${lastResponse.elapsed_ms ?? '-'} ms`),
-    h('span', { class: 'hint' }, formatSize(resp.size || (resp.body || '').length)),
-    lastResponse.request?.url
-      ? h(
-          'code',
-          {
-            class: 'mono hint meta-url',
-            title: lastResponse.request.url,
-            onclick: async () => {
-              const res = await copyText(lastResponse.request.url);
-              if (res.ok) toast('已复制 URL');
-              else toastCopyFailed(res.error);
-            }
-          },
-          truncateUrl(lastResponse.request.url)
-        )
-      : null,
-    h('span', { class: 'spacer' }),
-    h(
-      'button',
-      {
-        class: 'small',
-        onclick: async () => {
-          const text = resp.body || '';
-          const res = await copyText(text);
-          if (res.ok) toast('已复制响应体');
-          else toastCopyFailed(res.error);
-        }
-      },
-      '复制响应'
-    ),
-    h(
-      'button',
-      {
-        class: 'small',
-        onclick: () => doSend(true)
-      },
-      '保存为示例'
-    )
-  );
-
-  // 响应体：由工具条驱动（美化/原生/预览/可视化 + 格式 + 编码）
-  const bodyNode = buildResponseBody(view, lastResponse);
-
-  // 断言
-  const assertions = lastResponse.assertions || [];
-  const assertNodes =
-    assertions.length > 0
-      ? assertions.map((a) =>
-          h(
-            'div',
-            { class: 'run-assert' },
-            h('span', { class: `tag ${a.passed ? 'ok' : 'err'}` }, a.passed ? '通过' : '失败'),
-            h('span', {}, a.name),
-            a.message ? h('span', { class: 'hint' }, a.message) : null
-          )
-        )
-      : [h('div', { class: 'empty' }, '没有断言')];
-
-  // 控制台
-  const logs = lastResponse.console || [];
-  const logNodes =
-    logs.length > 0
-      ? [h('pre', { class: 'code' }, logs.map((c) => `[${c.level}] ${c.message}`).join('\n'))]
-      : [h('div', { class: 'empty' }, '没有日志')];
-
-  // 请求详情
-  const requestNode = requestDetailView(liveReq);
-
-  // 响应头（状态行 + 表 + Set-Cookie）
-  const responseHeaderNode = h(
-    'div',
-    { class: 'headers-pane' },
-    statusLine({
-      protocol: liveResp?.protocol || lastResponse.protocol || 'HTTP/1.1',
-      status: resp.status,
-      status_text: resp.status_text
-    }),
-    headersTable(liveResp?.headers || resp.headers, '响应头'),
-    liveResp?.set_cookies?.length
-      ? h(
-          'div',
-          { class: 'kv-block mt12' },
-          h('div', { class: 'kv-block-title' }, 'Set-Cookie', h('span', { class: 'hint' }, ` ${liveResp.set_cookies.length}`)),
-          cookieTable(liveResp.set_cookies, { mask: editor.debugMask })
-        )
-      : null
-  );
-
-  // Cookie 面板：请求侧 + 响应侧
-  const reqCookies = liveReq?.cookies || {};
-  const cookieHeader = (() => {
-    const headers = liveReq?.headers || {};
-    const key = Object.keys(headers).find((k) => k.toLowerCase() === 'cookie');
-    return key ? headers[key] : '';
-  })();
-  const cookieNode = h(
-    'div',
-    { class: 'cookie-pane' },
-    h('div', { class: 'kv-block-title' }, '请求带的 Cookie'),
-    Object.keys(reqCookies).length > 0
-      ? kvTable(reqCookies, { mask: editor.debugMask, keyWidth: 180 })
-      : cookieHeader
-        ? h('pre', { class: 'code' }, editor.debugMask ? '***' : cookieHeader)
-        : h('div', { class: 'form-hint' }, '本次请求没有 Cookie'),
-    h('div', { class: 'kv-block-title mt16' }, '响应下发的 Cookie'),
-    cookieTable(liveResp?.set_cookies || [], { mask: editor.debugMask })
-  );
-
-  const innerTabs = [
-    ['body', '实时响应'],
-    ['request', '请求详情'],
-    ['headers', '响应头'],
-    ['cookies', 'Cookie'],
-    ['assertions', '断言'],
-    ['console', '控制台']
-  ];
-
-  const active = editor.debugTab || 'body';
-  const contentMap = {
-    body: bodyNode,
-    request: requestNode,
-    headers: responseHeaderNode,
-    cookies: cookieNode,
-    assertions: h('div', {}, ...assertNodes),
-    console: h('div', {}, ...logNodes)
-  };
-
-  return h(
-    'div',
-    { class: 'debug-panel' },
-    meta,
-    h(
-      'div',
-      { class: 'debug-toolbar' },
-      h(
-        'label',
-        { class: 'check' },
-        h('input', {
-          type: 'checkbox',
-          checked: Boolean(editor.debugMask),
-          onchange: (e) => {
-            editor.debugMask = e.target.checked;
-            rerenderPane();
-          }
-        }),
-        '隐藏敏感值'
-      ),
-      h('span', { class: 'spacer-flex' }),
-      h(
-        'select',
-        {
-          class: 'curl-dialect-select',
-          title: '复制为 cURL 时使用的 shell 格式',
-          onchange: (e) => {
-            setCurlDialect(e.target.value);
-            rerenderPane();
-          }
-        },
-        ...CURL_DIALECT_OPTIONS.map(([value, label]) =>
-          h('option', { value, selected: getCurlDialectSetting() === value }, label)
-        )
-      ),
-      h(
-        'button',
-        {
-          class: 'small',
-          disabled: !liveReq,
-          onclick: () => copyAsCurl(liveReq)
-        },
-        '复制为 cURL'
-      ),
-      h(
-        'button',
-        {
-          class: 'small',
-          disabled: !liveReq,
-          title: '生成常见语言的调用代码',
-          onclick: () => openCodeSnippet(liveReq)
-        },
-        '生成代码'
-      )
-    ),
-    h(
-      'div',
-      { class: 'tabs tabs-sm' },
-      ...innerTabs.map(([key, label]) =>
-        h(
-          'div',
-          {
-            class: `tab${active === key ? ' active' : ''}`,
-            onclick: () => {
-              editor.debugTab = key;
-              rerenderPane();
-            }
-          },
-          label
-        )
-      )
-    ),
-    h('div', { class: 'debug-content' }, contentMap[active] || bodyNode)
-  );
-}
-
-/** 请求详情面板：方法 + 实际 URL + query + 请求头 + Cookie + body */
-function requestDetailView(req) {
-  if (!req) return h('div', { class: 'empty' }, '没有请求详情');
-
-  const headers = req.headers || {};
-  const query = req.query || {};
-  const bodyMode = req.body_mode || 'none';
-
-  return h(
-    'div',
-    { class: 'request-detail' },
-    h(
-      'div',
-      { class: 'kv-line' },
-      h('span', { class: `method ${String(req.method || '').toUpperCase()}` }, req.method || ''),
-      h('code', { class: 'mono kv-url' }, req.url || '')
-    ),
-    Object.keys(query).length > 0
-      ? h(
-          'div',
-          { class: 'kv-block mt12' },
-          h('div', { class: 'kv-block-title' }, 'Query 参数', h('span', { class: 'hint' }, ` ${Object.keys(query).length}`)),
-          kvTable(query)
-        )
-      : null,
-    h('div', { class: 'kv-block mt12' }, headersTable(headers, '请求头')),
-    bodyMode !== 'none'
-      ? h(
-          'div',
-          { class: 'kv-block mt12' },
-          collapsible(`请求体（${bodyMode}）`, h('pre', { class: 'code' }, req.body || '(空)'), { open: true })
-        )
-      : null
-  );
-}
+/* 响应面板由 workspace.js 的 responsePane() 提供，不再在此维护 */
 
 /* ---------------- 复制为 cURL ---------------- */
 
@@ -3182,11 +3512,6 @@ const MODES = [
 ];
 
 const PLACEHOLDER_INFO = {
-  case: {
-    title: '接口用例',
-    desc: '为同一接口编排多个测试场景（不同参数、不同断言），一键跑完并汇总结果。',
-    items: ['用例列表与增删改', '每条用例独立参数与断言', '批量执行与结果对比']
-  },
   stress: {
     title: '一键压测',
     desc: '对该接口发起并发压测，统计成功率与响应耗时分布。',
@@ -3216,6 +3541,93 @@ function placeholderPanel(mode) {
   );
 }
 
+/**
+ * 主保存按钮 + 下拉（另存为 / 删除）。
+ *
+ * 原本挂在模式页签行右端，现下移到请求行右端（设计页是契约地址行），
+ * 五种模式与文档/目录共用同一份实现。
+ */
+function saveSplit() {
+  const hasSelection = Boolean(editor.selectedId);
+
+  const mainBtn = h(
+    'button',
+    {
+      class: 'save-main',
+      disabled: !hasSelection,
+      title: '保存（Ctrl+S）',
+      onclick: () => Promise.resolve(saveActiveMode(window.__designRefresh)).catch((err) => toast(err.message, true))
+    },
+    saveButtonLabel()
+  );
+
+  const caret = h(
+    'button',
+    {
+      class: 'save-caret',
+      disabled: !hasSelection,
+      title: '更多保存操作',
+      onclick: (e) => {
+        e.stopPropagation();
+        toggleSaveMenu();
+      }
+    },
+    '▾'
+  );
+
+  const split = h('div', { class: 'save-split' }, mainBtn, caret);
+
+  let saveMenu = null;
+
+  const closeSaveMenu = () => {
+    if (!saveMenu) return;
+    saveMenu.remove();
+    saveMenu = null;
+    document.removeEventListener('click', closeSaveMenu, true);
+  };
+
+  const toggleSaveMenu = () => {
+    if (saveMenu) {
+      closeSaveMenu();
+      return;
+    }
+    saveMenu = h(
+      'div',
+      { class: 'send-menu save-menu' },
+      h(
+        'div',
+        {
+          class: 'send-menu-item',
+          onclick: () => {
+            closeSaveMenu();
+            openSaveAs(window.__designRefresh);
+          }
+        },
+        '另存为'
+      ),
+      h(
+        'div',
+        {
+          class: 'send-menu-item danger',
+          onclick: async () => {
+            closeSaveMenu();
+            await removeTarget({
+              target_id: editor.selectedId,
+              target_type: editor.targetType,
+              name: editor.data?.name || editor.selectedId
+            });
+          }
+        },
+        '删除'
+      )
+    );
+    split.append(saveMenu);
+    document.addEventListener('click', closeSaveMenu, true);
+  };
+
+  return split;
+}
+
 function modeTabs() {
   const active = editor.activeMode || 'design';
   // 文档与目录只保留「设计」：调试/用例/压测/Mock 对它们无意义
@@ -3233,14 +3645,28 @@ function modeTabs() {
           onclick: () => {
             if (editor.activeMode === key) return;
             editor.activeMode = key;
+            // 保存按钮跟着请求行/契约行重建，rerenderPane 会整体刷新
             rerenderPane();
-            // 保存按钮文案 / 禁用态跟随页签
-            const tb = document.querySelector('.editor-toolbar');
-            if (tb) tb.replaceWith(editorToolbar(window.__designRefresh));
           }
         },
         label
       )
+    ),
+    h('span', { class: 'spacer-flex' }),
+    h(
+      'span',
+      { id: 'dirty-badge', class: 'tag warn', style: hasUnsaved() ? '' : 'display:none' },
+      dirtyBadgeText()
+    ),
+    // curl 导入固定在页签行右端；保存按钮已下移到请求行（设计页在契约地址行）
+    h(
+      'button',
+      {
+        class: 'small curl-import-btn',
+        title: '粘贴 curl 命令自动填 URL、Header、Body',
+        onclick: () => openCurlImport()
+      },
+      'curl 导入'
     )
   );
 }
@@ -3476,11 +3902,9 @@ function docEditor() {
 /* ---------------- 目录：基础 / 参数 / Body / 鉴权 / 脚本 ---------------- */
 
 const FOLDER_TABS = [
-  ['basic', '基础'],
-  ['params', '参数'],
-  ['body', 'Body'],
-  ['auth', '鉴权'],
-  ['scripts', '脚本']
+  ['basic', '目录设置'],
+  ['params', '目录参数'],
+  ['list', '接口列表']
 ];
 
 /** 目录可用服务：来自「环境与变量」页维护的项目共享服务 */
@@ -3571,18 +3995,47 @@ function folderView() {
     )
   );
 
+  const folderChildren = editor.apiIndex.filter(
+    (i) => String(i.parent_id || '0') === String(editor.selectedId)
+  );
+
+  const listPane = h(
+    'div',
+    { class: 'folder-api-list' },
+    folderChildren.length === 0
+      ? h('div', { class: 'empty' }, '该目录下还没有内容')
+      : h(
+          'div',
+          { class: 'folder-api-rows' },
+          ...folderChildren.map((item) =>
+            h(
+              'div',
+              {
+                class: 'folder-api-row',
+                onclick: () => {
+                  if (hasUnsaved() && !confirm('当前对象有未保存的修改，确定切换？')) return;
+                  loadApi(editor.projectId, item.target_id)
+                    .then(() => {
+                      editor.activeMode = item.target_type === 'folder' ? 'design' : 'design';
+                      rerenderTree();
+                      rerenderPane();
+                    })
+                    .catch((err) => toast(err.message, true));
+                }
+              },
+              h('span', { class: 'tree-icon' }, nodeIcon(item)),
+              item.method ? h('span', { class: `method ${String(item.method).toUpperCase()}` }, item.method) : null,
+              h('span', { class: 'folder-api-name' }, item.name || item.target_id),
+              h('span', { class: 'hint mono folder-api-url' }, item.url || '')
+            )
+          )
+        )
+  );
+
   const panes = {
     basic: basicPane,
-    params: tabParams(d.request, markDirty, { sections: ['query', 'header'] }),
-    body: tabBody(d.request.body = d.request.body || { mode: 'none', parameter: [] }, markDirty, {
-      allowedModes: [
-        ['none', '不使用'],
-        ['form-data', 'form-data'],
-        ['urlencoded', 'urlencoded']
-      ]
-    }),
-    auth: tabAuth(d.request, markDirty),
-    scripts: tabScripts(d.request, markDirty)
+    params: tabParams(d.request, markDirty, { sections: ['query', 'restful', 'header'] }),
+    list: listPane
   };
 
   return h(
@@ -3622,7 +4075,7 @@ function buildPane() {
 
   const mode = editor.activeMode || 'design';
 
-  // 暴露给 extra.js 的桥接
+  // 暴露给 workspace.js / extra.js 的桥接
   window.__designState = editor;
   window.__designApi = api;
   window.__designRerender = () => rerenderPane();
@@ -3633,7 +4086,7 @@ function buildPane() {
   window.__designSave = () => saveCurrent(window.__designRefresh);
   window.__designSaveActive = () => saveActiveMode(window.__designRefresh);
 
-  // 文档：专属 Markdown 编辑器（不显示接口的六页签）
+  // 文档：专属 Markdown 编辑器（不显示接口的模式页签）
   if (editor.targetType === 'doc') {
     return h(
       'div',
@@ -3653,80 +4106,872 @@ function buildPane() {
     );
   }
 
-  // 非设计模式
-  if (mode !== 'design') {
-    const header = h('div', { class: 'editor-mode-head' }, modeTabs());
-    if (mode === 'debug') {
-      return h(
-        'div',
-        { class: 'editor-inner' },
-        header,
-        requestBar(),
-        h('div', { class: 'debug-wrap' }, debugPanel())
-      );
-    }
-    // 用例 / 压测 / Mock 面板
-    let panel;
-    if (mode === 'case') panel = window.ApiExtra ? window.ApiExtra.cases() : placeholderPanel(mode);
-    else if (mode === 'stress') panel = window.ApiExtra ? window.ApiExtra.stress() : placeholderPanel(mode);
-    else if (mode === 'mock') panel = window.ApiExtra ? window.ApiExtra.mock() : placeholderPanel(mode);
-    else panel = placeholderPanel(mode);
+  // 设计页：契约定义视图（单栏，不发送）
+  if (mode === 'design') return designPane(d);
 
-    return h(
-      'div',
-      { class: 'editor-inner' },
-      header,
-      mode === 'case' ? null : requestBar({ readonly: mode !== 'debug' }),
-      panel
-    );
+  // 调试页：请求构建区 + 常驻响应区（左右分栏，可发送）
+  if (mode === 'debug') {
+    if (window.ApiWorkspace) return window.ApiWorkspace.shell(d);
+    return h('div', { class: 'empty' }, '工作区脚本未加载，请刷新页面');
   }
 
-  const tab = editor.activeTab || 'basic';
-  let body;
-  if (tab === 'basic') body = tabBasic();
-  else if (tab === 'params') body = tabParams();
-  else if (tab === 'body') body = tabBody();
-  else if (tab === 'auth') body = tabAuth();
-  else if (tab === 'scripts') body = tabScripts();
-  else body = tabResponse();
+  // 用例 / 压测 / Mock 面板
+  let panel;
+  if (mode === 'case') panel = window.ApiExtra ? window.ApiExtra.cases() : placeholderPanel(mode);
+  else if (mode === 'stress') panel = window.ApiExtra ? window.ApiExtra.stress() : placeholderPanel(mode);
+  else if (mode === 'mock') panel = window.ApiExtra ? window.ApiExtra.mock() : placeholderPanel(mode);
+  else panel = placeholderPanel(mode);
 
   return h(
     'div',
     { class: 'editor-inner' },
     modeTabs(),
-    requestBar(),
-    metaBar(),
+    mode === 'case' ? null : requestBar({ readonly: true }),
+    panel
+  );
+}
+
+/* ---------------- 设计页：契约视图 ---------------- */
+
+/**
+ * 契约参数表：与调试页的 paramTable 不同，这里面向「接口文档」而非「发送」。
+ * 列：参数名 | 类型 | 必填 | 示例值 | 描述
+ *
+ * 示例值写 example_value，与实际发送用的 value 分开，
+ * 避免在设计页改示例值时悄悄改变调试页真正发出去的内容。
+ */
+function contractTable(list, onChange, { addLabel = '添加参数' } = {}) {
+  const host = h('div', { class: 'param-table contract-table' });
+
+  const commit = () => onChange(list.map((p) => ({ ...p })));
+
+  const render = () => {
+    const nodes = [];
+
+    nodes.push(
+      h(
+        'div',
+        { class: 'param-head contract-head' },
+        h('span', {}),
+        h('span', {}, '参数名'),
+        h('span', {}, '类型'),
+        h('span', {}, '必填'),
+        h('span', {}, '示例值'),
+        h('span', {}, '描述'),
+        h('span', {})
+      )
+    );
+
+    list.forEach((p, index) => {
+      nodes.push(
+        h(
+          'div',
+          { class: 'param-row contract-row' },
+          h('input', {
+            type: 'checkbox',
+            title: '参与接口文档',
+            checked: Number(p.is_checked) !== -1,
+            onchange: (e) => {
+              p.is_checked = e.target.checked ? 1 : -1;
+              commit();
+            }
+          }),
+          h('input', {
+            type: 'text',
+            class: 'mono-input',
+            placeholder: '参数名',
+            value: p.key ?? '',
+            oninput: (e) => {
+              p.key = e.target.value;
+              commit();
+            }
+          }),
+          select(
+            FIELD_TYPES.map((t) => [t, t]),
+            p.field_type || 'String',
+            (v) => {
+              p.field_type = v;
+              commit();
+            },
+            { class: 'param-type' }
+          ),
+          h(
+            'label',
+            { class: 'check contract-required', title: '必填字段会写入 OpenAPI 的 required' },
+            h('input', {
+              type: 'checkbox',
+              checked: Number(p.not_null) === 1,
+              onchange: (e) => {
+                p.not_null = e.target.checked ? 1 : -1;
+                commit();
+              }
+            })
+          ),
+          h('input', {
+            type: 'text',
+            class: 'mono-input',
+            placeholder: '示例值',
+            value: p.example_value ?? '',
+            oninput: (e) => {
+              p.example_value = e.target.value;
+              commit();
+            }
+          }),
+          h('input', {
+            type: 'text',
+            placeholder: '说明',
+            value: p.description ?? '',
+            oninput: (e) => {
+              p.description = e.target.value;
+              commit();
+            }
+          }),
+          h(
+            'button',
+            {
+              class: 'small danger',
+              title: '删除',
+              onclick: () => {
+                list.splice(index, 1);
+                commit();
+                render();
+              }
+            },
+            '×'
+          )
+        )
+      );
+    });
+
+    if (list.length === 0) {
+      nodes.push(h('div', { class: 'param-empty' }, '暂无参数'));
+    }
+
+    nodes.push(
+      h(
+        'button',
+        {
+          class: 'small param-add',
+          onclick: () => {
+            list.push(newParam({ example_value: '' }));
+            commit();
+            render();
+          }
+        },
+        `+ ${addLabel}`
+      )
+    );
+
+    host.replaceChildren(...nodes);
+  };
+
+  render();
+  return host;
+}
+
+/** 契约参数小节：标题 + 计数 + 批量编辑入口 + 表格 */
+function contractSection(title, holder, onChange = markDirty) {
+  if (!holder) return null;
+  if (!Array.isArray(holder.parameter)) holder.parameter = [];
+  return h(
+    'div',
+    { class: 'param-section' },
     h(
       'div',
-      { class: 'tabs' },
-      ...TABS.map(([key, label]) =>
+      { class: 'param-section-title' },
+      title,
+      h('span', { class: 'tab-badge' }, holder.parameter.length),
+      h(
+        'button',
+        {
+          class: 'small param-bulk-btn',
+          title: '按文本批量导入参数',
+          onclick: () => openBulkEdit(holder.parameter, onChange, title)
+        },
+        '批量编辑'
+      )
+    ),
+    contractTable(holder.parameter, (next) => {
+      holder.parameter = next;
+      onChange();
+    })
+  );
+}
+
+/** 设计页：契约定义视图（单栏，不发送） */
+function designPane(d) {
+  const req = d.request || defaultRequest();
+  const resp = d.response || {};
+
+  const examples = Array.isArray(resp.example) ? resp.example : [];
+  const mainExample = examples.find((e) => Number(e?.expect?.is_default) === 1) || examples[0] || null;
+  const expect = mainExample?.expect || null;
+  const schema = expect?.schema;
+  const schemaText = schema && Object.keys(schema).length > 0 ? JSON.stringify(schema, null, 2) : '';
+
+  return h(
+    'div',
+    { class: 'editor-inner design-contract' },
+    modeTabs(),
+    metaBar(),
+    contractRequestLine(d),
+    h(
+      'div',
+      { class: 'contract-body' },
+      contractSection('Header 参数', req.header),
+      contractSection('Query 参数', req.query),
+      contractSection('Path 参数', req.restful),
+      contractSection('Cookie 参数', req.cookie),
+      h(
+        'div',
+        { class: 'param-section' },
+        h('div', { class: 'param-section-title' }, 'Body', h('span', { class: 'tab-badge' }, String(req.body?.mode || 'none'))),
+        tabBody(req.body)
+      ),
+      h(
+        'div',
+        { class: 'param-section' },
+        h(
+          'div',
+          { class: 'param-section-title' },
+          '响应结构',
+          h(
+            'span',
+            { class: 'tab-badge' },
+            `${expect?.code || '-'} · ${expect?.content_type || 'json'}`
+          )
+        ),
+        h(
+          'div',
+          { class: 'contract-response' },
+          h(
+            'div',
+            { class: 'kv-block' },
+            h('div', { class: 'kv-block-title' }, '状态码与类型'),
+            h(
+              'div',
+              { class: 'kv' },
+              h('span', { class: 'k' }, '期望状态码'),
+              h('span', { class: 'v mono' }, String(expect?.code || '未设置')),
+              h('span', { class: 'k' }, 'Content-Type'),
+              h('span', { class: 'v mono' }, String(expect?.content_type || '未设置')),
+              h('span', { class: 'k' }, '校验方式'),
+              h('span', { class: 'v mono' }, String(expect?.verify_type || 'schema'))
+            )
+          ),
+          h(
+            'div',
+            { class: 'kv-block mt16' },
+            h(
+              'div',
+              { class: 'kv-block-title' },
+              '数据结构（JSON Schema）',
+              hasSchemaContent(schema)
+                ? h('span', { class: 'tag info' }, '已配置')
+                : h('span', { class: 'hint' }, '未配置')
+            ),
+            schemaText
+              ? h(
+                  'div',
+                  { class: 'form-control' },
+                  textarea(schemaText, () => {}, { rows: 12, readonly: true, toolbar: 'json' })
+                )
+              : h(
+                  'div',
+                  { class: 'form-hint' },
+                  '没有配置响应结构。可到「调试 → 响应示例」里编辑，或用「由上方响应体反推」生成。'
+                )
+          )
+        )
+      )
+    ),
+    h(
+      'div',
+      { class: 'form-hint mt16' },
+      '设计页只定义契约，不会发送请求。要实际调用接口请切到「调试」。'
+    )
+  );
+}
+
+/** 设计页顶部的地址行：只读展示，不提供发送按钮，右端承载保存按钮 */
+function contractRequestLine(d) {
+  return h(
+    'div',
+    { class: 'contract-addr' },
+    h('span', { class: `method ${String(d.method || 'GET').toUpperCase()}` }, String(d.method || 'GET').toUpperCase()),
+    h('code', { class: 'mono contract-url' }, d.url || '（未填写 URL）'),
+    h('span', { class: 'hint' }, d.protocol || 'http/1.1'),
+    saveSplit()
+  );
+}
+
+/* ---------------- 参数批量编辑弹窗 ---------------- */
+
+const BULK_FORMATS = [
+  ['kv', 'Key-Value 格式'],
+  ['json', 'Raw-Json 格式'],
+  ['desc', '带描述']
+];
+
+const BULK_NAMING = [
+  ['keep', '保持原样'],
+  ['camel', '小驼峰'],
+  ['snake', '下划线'],
+  ['upper', '全大写']
+];
+
+/** 命名风格转换 */
+function applyNaming(name, style) {
+  const raw = String(name || '').trim();
+  if (!raw) return '';
+  const words = raw
+    .replace(/[_\-\s]+/g, ' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .split(' ')
+    .filter(Boolean);
+  if (style === 'camel') {
+    return words
+      .map((w, i) => (i === 0 ? w.toLowerCase() : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()))
+      .join('');
+  }
+  if (style === 'snake') return words.map((w) => w.toLowerCase()).join('_');
+  if (style === 'upper') return words.map((w) => w.toUpperCase()).join('_');
+  return raw;
+}
+
+/**
+ * 解析批量编辑文本。
+ * @param {string} text
+ * @param {'kv'|'json'|'desc'} format
+ * @returns {{ok: boolean, params?: Array, error?: string}}
+ */
+function parseBulkText(text, format) {
+  const raw = String(text || '');
+
+  if (format === 'json') {
+    const trimmed = raw.trim();
+    if (!trimmed) return { ok: true, params: [] };
+    let parsed;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch (err) {
+      return { ok: false, error: `JSON 解析失败：${err.message}` };
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { ok: false, error: '需要是一个扁平 JSON 对象，例如 {"role":"Manager"}' };
+    }
+    const params = [];
+    for (const [key, value] of Object.entries(parsed)) {
+      if (value !== null && typeof value === 'object') {
+        return { ok: false, error: `字段「${key}」是嵌套结构，请先拍平再导入` };
+      }
+      params.push({ key, value: value === null ? '' : String(value), description: '' });
+    }
+    return { ok: true, params };
+  }
+
+  const params = [];
+  const lines = raw.split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    const firstColon = trimmed.indexOf(':');
+    if (firstColon < 0) {
+      return { ok: false, error: `第 ${index + 1} 行缺少冒号，应为「参数名: 参数值」` };
+    }
+    const key = trimmed.slice(0, firstColon).trim();
+    if (!key) return { ok: false, error: `第 ${index + 1} 行参数名为空` };
+
+    const rest = trimmed.slice(firstColon + 1).trim();
+
+    if (format === 'kv') {
+      params.push({ key, value: rest, description: '' });
+      continue;
+    }
+
+    // desc：参数名: 参数值: 描述
+    const secondColon = rest.indexOf(':');
+    if (secondColon < 0) {
+      params.push({ key, value: rest, description: '' });
+    } else {
+      params.push({
+        key,
+        value: rest.slice(0, secondColon).trim(),
+        description: rest.slice(secondColon + 1).trim()
+      });
+    }
+  }
+  return { ok: true, params };
+}
+
+/**
+ * 批量编辑弹窗：左侧输入、右侧实时预览，底部命名风格与确定/取消。
+ * 纯本地解析：不调用 AI，也不需要配置 API Key。
+ */
+function openBulkEdit(list, onChange, title = '参数') {
+  const showModal = window.__consoleShowModal;
+  const closeModal = window.__consoleCloseModal;
+  if (!showModal) {
+    toast('弹窗组件未加载', true);
+    return;
+  }
+
+  const state = { format: 'kv', naming: 'keep' };
+
+  const input = h('textarea', {
+    class: 'mono-input bulk-edit-input',
+    rows: 16,
+    placeholder:
+      '每行「参数名: 参数值」，空行与 # 开头的行会被忽略\n\n例如：\nrole: Manager\nname: apipost\nage: 23'
+  });
+
+  const previewHost = h('div', { class: 'bulk-edit-preview' });
+  const namingSelect = select(BULK_NAMING, state.naming, (v) => {
+    state.naming = v;
+    renderPreview();
+  }, { class: 'tb-select' });
+
+  const formatTabs = h('div', { class: 'tabs tabs-sm bulk-edit-tabs' });
+
+  const renderFormatTabs = () => {
+    formatTabs.replaceChildren(
+      ...BULK_FORMATS.map(([key, label]) =>
         h(
           'div',
           {
-            class: `tab${tab === key ? ' active' : ''}`,
+            class: `tab${state.format === key ? ' active' : ''}`,
             onclick: () => {
-              editor.activeTab = key;
-              rerenderPane();
+              state.format = key;
+              input.placeholder =
+                key === 'json'
+                  ? '扁平 JSON 对象，例如：\n{\n  "role": "Manager",\n  "name": "apipost",\n  "age": 23\n}'
+                  : key === 'desc'
+                    ? '每行「参数名: 参数值: 描述」，例如：\nrole: Manager: 角色\nname: apipost: 名称'
+                    : '每行「参数名: 参数值」，例如：\nrole: Manager\nname: apipost';
+              renderFormatTabs();
+              renderPreview();
             }
           },
           label
         )
+      )
+    );
+  };
+
+  let parsed = [];
+  const renderPreview = () => {
+    const result = parseBulkText(input.value, state.format);
+    if (!result.ok) {
+      parsed = [];
+      previewHost.replaceChildren(h('div', { class: 'form-hint err' }, result.error));
+      return;
+    }
+    parsed = result.params.map((p) => ({ ...p, key: applyNaming(p.key, state.naming) }));
+
+    if (parsed.length === 0) {
+      previewHost.replaceChildren(h('div', { class: 'empty' }, "输入「参数名: 参数值」查看预览"));
+      return;
+    }
+
+    previewHost.replaceChildren(
+      h(
+        'div',
+        { class: 'bulk-preview-list' },
+        h(
+          'div',
+          { class: 'bulk-preview-head' },
+          h('span', {}, '参数名'),
+          h('span', {}, '参数值'),
+          h('span', {}, '描述')
+        ),
+        ...parsed.map((p) =>
+          h(
+            'div',
+            { class: 'bulk-preview-row' },
+            h('span', { class: 'mono' }, p.key),
+            h('span', { class: 'mono' }, p.value),
+            h('span', { class: 'hint' }, p.description || '')
+          )
+        ),
+        h('div', { class: 'form-hint mt8' }, `共 ${parsed.length} 条`)
+      )
+    );
+  };
+
+  input.addEventListener('input', renderPreview);
+  renderFormatTabs();
+  renderPreview();
+
+  const confirm = () => {
+    if (parsed.length === 0) {
+      toast('没有可导入的参数', true);
+      return;
+    }
+    let added = 0;
+    let updated = 0;
+    for (const item of parsed) {
+      const key = String(item.key || '').trim();
+      if (!key) continue;
+      const existing = list.find((p) => String(p.key || '').trim() === key);
+      if (existing) {
+        existing.value = item.value;
+        if (item.description) existing.description = item.description;
+        updated += 1;
+      } else {
+        list.push(newParam({ key, value: item.value, description: item.description || '' }));
+        added += 1;
+      }
+    }
+    onChange();
+    closeModal();
+    rerenderPane();
+    toast(`已导入 ${added} 条${updated > 0 ? `，覆盖 ${updated} 条同名参数` : ''}`);
+  };
+
+  showModal(
+    `批量编辑 · ${title}`,
+    h(
+      'div',
+      { class: 'bulk-edit-body' },
+      formatTabs,
+      h(
+        'div',
+        { class: 'bulk-edit-split' },
+        h('div', { class: 'bulk-edit-col' }, h('div', { class: 'bulk-edit-col-title' }, '输入'), input),
+        h('div', { class: 'bulk-edit-col' }, h('div', { class: 'bulk-edit-col-title' }, '预览'), previewHost)
       ),
       h(
         'div',
-        {
-          class: 'tab tab-action',
-          title: '粘贴 curl 命令自动填 URL、Header、Body',
-          onclick: () => openCurlImport()
-        },
-        'curl 导入'
+        { class: 'bulk-edit-foot' },
+        h('span', { class: 'hint' }, '命名方式'),
+        namingSelect
       )
     ),
-    h('div', { class: 'editor-body' }, body)
+    [
+      h('button', { onclick: () => closeModal() }, '取消'),
+      h(
+        'button',
+        {
+          onclick: async () => {
+            const text = parsed.map((p) => `${p.key}: ${p.value}`).join('\n');
+            const res = await copyText(text);
+            if (res.ok) toast('已复制预览结果');
+            else toastCopyFailed(res.error);
+          }
+        },
+        '复制'
+      ),
+      h('button', { class: 'primary', onclick: confirm }, '确定')
+    ]
   );
+
+  input.focus();
 }
 
-/* ---------------- 操作结果提示 ---------------- */
+/* ---------------- 响应示例面板（调试页页签） ---------------- */
+
+/**
+ * 响应示例：左侧「成功 / 失败」切换与编辑、新建期望，右侧导入/字段描述/美化/删除。
+ * 工具条严格左右两栏对齐，是 Apipost 响应示例页的标志性布局。
+ */
+function responseExamplePane() {
+  const d = ensureShape(editor.data);
+  if (!d) return h('div', { class: 'empty' }, '请选择接口');
+
+  const resp = d.response;
+  if (!Array.isArray(resp.example)) resp.example = [];
+
+  const host = h('div', { class: 'example-pane' });
+
+  const render = () => {
+    const list = resp.example;
+    const activeIndex = Math.min(
+      Math.max(0, Number(editor.exampleIndex) || 0),
+      Math.max(0, list.length - 1)
+    );
+    editor.exampleIndex = activeIndex;
+    const current = list[activeIndex] || null;
+
+    if (current) {
+      current.expect = current.expect || {
+        code: '200',
+        name: '成功',
+        is_default: list.length === 1 ? 1 : -1,
+        verify_type: 'schema',
+        content_type: 'json',
+        schema: { type: 'object', properties: {} }
+      };
+    }
+
+    const editing = Boolean(editor.exampleEditing);
+
+    const switchTabs = h(
+      'div',
+      { class: 'seg-group example-switch' },
+      ...list.map((ex, i) =>
+        h(
+          'button',
+          {
+            class: `seg${i === activeIndex ? ' active' : ''}`,
+            onclick: () => {
+              editor.exampleIndex = i;
+              editor.exampleEditing = false;
+              render();
+            }
+          },
+          (ex.expect && ex.expect.name) || `示例${i + 1}`
+        )
+      )
+    );
+
+    const leftTools = h(
+      'div',
+      { class: 'example-tools-left' },
+      switchTabs,
+      list.length > 0
+        ? h(
+            'button',
+            {
+              class: 'small',
+              onclick: () => {
+                editor.exampleEditing = !editing;
+                render();
+              }
+            },
+            editing ? '完成' : '编辑'
+          )
+        : null,
+      h(
+        'button',
+        {
+          class: 'small primary',
+          onclick: () => {
+            resp.example.push({
+              example_id: `${Date.now().toString(16)}${Math.random().toString(16).slice(2, 8)}`,
+              expect: {
+                code: '200',
+                name: `示例${list.length + 1}`,
+                is_default: list.length === 0 ? 1 : -1,
+                verify_type: 'schema',
+                content_type: 'json',
+                schema: { type: 'object', properties: {} }
+              },
+              raw: '',
+              raw_parameter: []
+            });
+            editor.exampleIndex = resp.example.length - 1;
+            editor.exampleEditing = true;
+            markDirty();
+            render();
+          }
+        },
+        '+ 新建期望'
+      )
+    );
+
+    const live = window.ApiWorkspace?.getResponse(editor.selectedId);
+    const liveBody = live?.response?.body || '';
+
+    const rightTools = h(
+      'div',
+      { class: 'example-tools-right' },
+      h(
+        'button',
+        {
+          class: 'small',
+          disabled: !current || !liveBody,
+          title: liveBody ? '把上一次响应的响应体写入当前示例' : '还没有可导入的响应，请先到「实时响应」发送一次',
+          onclick: () => {
+            if (!current) return;
+            current.raw = liveBody;
+            markDirty();
+            render();
+            toast('已从现有响应导入');
+          }
+        },
+        '从现有响应导入'
+      ),
+      h(
+        'button',
+        {
+          class: 'small',
+          disabled: !current,
+          title: '根据示例响应体反推 JSON Schema',
+          onclick: () => {
+            if (!current) return;
+            const parsed = (() => {
+              try {
+                return JSON.parse(current.raw || '{}');
+              } catch {
+                return null;
+              }
+            })();
+            const schema = window.CurlParse?.jsonToSchema?.(parsed);
+            if (!schema) {
+              toast('示例响应体不是合法 JSON，无法反推结构', true);
+              return;
+            }
+            current.expect.schema = schema;
+            current.raw_schema = schema;
+            current.raw_parameter = window.CurlParse?.schemaToParameters?.(schema) || [];
+            markDirty();
+            render();
+            toast('已生成字段描述');
+          }
+        },
+        '字段描述'
+      ),
+      h(
+        'button',
+        {
+          class: 'small',
+          disabled: !current,
+          onclick: () => {
+            const text = String(current?.raw || '').trim();
+            if (!text) {
+              toast('示例响应体为空', true);
+              return;
+            }
+            try {
+              current.raw = JSON.stringify(JSON.parse(text), null, 2);
+              markDirty();
+              render();
+            } catch (err) {
+              toast(`JSON 格式错误：${err.message}`, true);
+            }
+          }
+        },
+        '美化'
+      ),
+      h(
+        'button',
+        {
+          class: 'small danger',
+          disabled: !current,
+          onclick: () => {
+            if (!current) return;
+            if (!confirm(`删除示例「${current.expect?.name || ''}」？`)) return;
+            resp.example.splice(activeIndex, 1);
+            editor.exampleIndex = 0;
+            editor.exampleEditing = false;
+            markDirty();
+            render();
+          }
+        },
+        '删除'
+      )
+    );
+
+    const toolbar = h('div', { class: 'example-toolbar' }, leftTools, h('span', { class: 'spacer' }), rightTools);
+
+    const editorArea = !current
+      ? h('div', { class: 'empty' }, '还没有响应示例，点「+ 新建期望」开始定义')
+      : editing
+        ? h(
+            'div',
+            { class: 'example-editor' },
+            h(
+              'div',
+              { class: 'example-meta' },
+              h('span', { class: 'hint' }, '名称'),
+              input(current.expect.name || '', (v) => {
+                current.expect.name = v;
+                markDirty();
+              }, { placeholder: '示例名称' }),
+              h('span', { class: 'hint' }, '状态码'),
+              input(String(current.expect.code ?? '200'), (v) => {
+                current.expect.code = v;
+                markDirty();
+              }, { placeholder: '200' }),
+              h('span', { class: 'hint' }, 'Content-Type'),
+              select(RESP_CONTENT_TYPES, current.expect.content_type || 'json', (v) => {
+                current.expect.content_type = v;
+                markDirty();
+              }, { class: 'tb-select' }),
+              h(
+                'label',
+                { class: 'check' },
+                h('input', {
+                  type: 'checkbox',
+                  checked: Number(current.expect.is_default) === 1,
+                  onchange: (e) => {
+                    resp.example.forEach((other) => {
+                      other.expect = other.expect || {};
+                      other.expect.is_default = -1;
+                    });
+                    current.expect.is_default = e.target.checked ? 1 : -1;
+                    markDirty();
+                  }
+                }),
+                '默认期望'
+              )
+            ),
+            textarea(current.raw ?? '', (v) => {
+              current.raw = v;
+              markDirty();
+            }, { rows: 16, placeholder: '{\n  "code": 0,\n  "msg": "ok"\n}', toolbar: 'json' }),
+            h(
+              'details',
+              { class: 'example-advanced' },
+              h('summary', {}, '详细配置（校验方式 / 数据结构 / 响应头）'),
+              h(
+                'div',
+                { class: 'form-grid mt12' },
+                field('校验方式', select(VERIFY_TYPES, current.expect.verify_type || 'schema', (v) => {
+                  current.expect.verify_type = v;
+                  markDirty();
+                  render();
+                }))
+              ),
+              current.expect.verify_type === 'schema'
+                ? h(
+                    'div',
+                    { class: 'mt12' },
+                    h('div', { class: 'form-label' }, '数据结构（JSON Schema）'),
+                    textarea(
+                      JSON.stringify(current.expect.schema || {}, null, 2),
+                      (v) => {
+                        try {
+                          const parsed = JSON.parse(v || '{}');
+                          current.expect.schema = parsed;
+                          current.raw_schema = parsed;
+                          current.raw_parameter = window.CurlParse?.schemaToParameters?.(parsed) || [];
+                          markDirty();
+                        } catch {}
+                      },
+                      { rows: 12, toolbar: 'json' }
+                    )
+                  )
+                : null,
+              h(
+                'div',
+                { class: 'mt12' },
+                h('div', { class: 'form-label' }, '响应头校验'),
+                expectHeadersEditor(current, () => {
+                  markDirty();
+                  render();
+                })
+              )
+            )
+          )
+        : h(
+            'div',
+            { class: 'example-view' },
+            current.raw
+              ? h('pre', { class: 'code' }, current.raw)
+              : h('div', { class: 'empty' }, '示例响应体为空，点「编辑」填写')
+          );
+
+    host.replaceChildren(toolbar, editorArea);
+  };
+
+  render();
+  return host;
+}
+
+
 
 /**
  * 统一的操作结果提示。
@@ -3777,6 +5022,9 @@ async function saveCurrent(onRefresh) {
   await loadTree(editor.projectId);
   // 重新加载以同步 version 等字段；keepAux 保住用例 / Mock 面板的内存草稿
   await loadApi(editor.projectId, editor.selectedId, { keepAux: true });
+  // 保存后 tab 上的名称 / 方法 / 脏点都要跟着更新
+  snapshotActiveTab();
+  renderTabBar();
   rerenderTree();
   rerenderPane();
   const tb = document.querySelector('.editor-toolbar');
@@ -3858,13 +5106,14 @@ const CREATE_META = {
   doc: { title: '新建文档', defaultName: '新文档', placeholder: '文档名称' }
 };
 
-/** 统一的「新建后跳转」：刷新树、选中新对象、回到设计模式并重绘 */
+/** 统一的「新建后跳转」：刷新树、选中新对象、回到接口工作区并重绘 */
 async function focusTarget(targetId, onRefresh) {
   await loadTree(editor.projectId);
   await loadApi(editor.projectId, targetId);
-  // 回到设计模式（避免停在调试/压测/Mock）
+  // 回到接口工作区（避免停在压测/Mock/期望）
   editor.activeMode = 'design';
   editor.activeTab = editor.targetType === 'doc' ? 'doc' : 'basic';
+  editor.wsTab = 'header';
   rerenderTree();
   rerenderPane();
   const tb = document.querySelector('.editor-toolbar');
@@ -4187,47 +5436,147 @@ function saveButtonLabel() {
   return '保存';
 }
 
+/**
+ * 「+ 新建」分组菜单：2 列卡片 + 导入区。
+ * 只把仓库真实支持的项做成可用；其余置灰并在 title 里写明原因。
+ */
+const NEW_MENU_ITEMS = [
+  [
+    { label: 'HTTP', kind: 'api', icon: 'H', color: 'red' },
+    { label: 'Event Stream', icon: 'S', color: 'blue', disabled: true, reason: 'SSE 目前只有类型占位，尚无编辑器与执行层' },
+    { label: 'WebSocket', icon: 'W', color: 'yellow', disabled: true, reason: 'WebSocket 协议尚未实现' },
+    { label: 'Socket.IO', icon: 'IO', color: 'green', disabled: true, reason: 'Socket.IO 协议尚未实现' },
+    { label: 'gRPC', icon: 'g', color: 'orange', beta: true, disabled: true, reason: 'gRPC 协议尚未实现' },
+    { label: 'GraphQL', icon: 'G', color: 'pink', beta: true, disabled: true, reason: 'GraphQL 协议尚未实现' },
+    { label: 'TCP 客户端', icon: 'T', color: 'teal', disabled: true, reason: 'TCP 客户端尚未实现' },
+    { label: 'Markdown', kind: 'doc', icon: 'M', color: 'blue' }
+  ]
+];
+
+const IMPORT_MENU_ITEMS = [
+  { label: 'AI 智能提取', action: 'ai', icon: 'AI', color: 'purple' },
+  { label: 'cURL 导入', action: 'curl', icon: 'c', color: 'orange' },
+  { label: '粘贴接口/文本', action: 'paste', icon: 'P', color: 'yellow' },
+  { label: 'IDEA 上传', action: 'idea', icon: 'IDEA', color: 'blue', disabled: true, reason: 'IDEA 插件上传需要配套插件，暂不支持' }
+];
+
+function newMenuCard(item, onRefresh) {
+  const disabled = Boolean(item.disabled);
+  return h(
+    'button',
+    {
+      class: `new-menu-card${disabled ? ' disabled' : ''}`,
+      title: disabled ? item.reason : `新建${item.label}`,
+      'aria-disabled': disabled ? 'true' : 'false',
+      onclick: (e) => {
+        e.stopPropagation();
+        if (disabled) {
+          toast(item.reason, true);
+          return;
+        }
+        closeNewMenu();
+        if (item.kind) openCreateDialog(item.kind, onRefresh);
+        else if (item.action === 'curl') openCurlImport();
+        else if (item.action === 'paste') openPasteImport({ target_id: '0', name: '根目录' });
+        else if (item.action === 'ai') openAiDraftDialog(onRefresh);
+      }
+    },
+    h('span', { class: `new-menu-icon c-${item.color || 'gray'}` }, item.icon || '?'),
+    h('span', { class: 'new-menu-label' }, item.label),
+    item.beta ? h('span', { class: 'new-menu-beta' }, 'Beta') : null
+  );
+}
+
+let newMenuEl = null;
+
+function closeNewMenu() {
+  if (newMenuEl) {
+    newMenuEl.remove();
+    newMenuEl = null;
+    document.removeEventListener('click', closeNewMenu, true);
+  }
+}
+
+function openNewMenu(anchor, onRefresh) {
+  closeNewMenu();
+  const panel = h(
+    'div',
+    { class: 'new-menu' },
+    h('div', { class: 'new-menu-group-title' }, '新建'),
+    h(
+      'div',
+      { class: 'new-menu-grid' },
+      ...NEW_MENU_ITEMS[0].map((item) => newMenuCard(item, onRefresh))
+    ),
+    h(
+      'button',
+      {
+        class: 'new-menu-card full',
+        onclick: (e) => {
+          e.stopPropagation();
+          closeNewMenu();
+          openCreateDialog('folder', onRefresh);
+        }
+      },
+      h('span', { class: 'new-menu-icon c-purple' }, 'D'),
+      h('span', { class: 'new-menu-label' }, '目录')
+    ),
+    h('div', { class: 'new-menu-sep' }),
+    h('div', { class: 'new-menu-group-title' }, '导入'),
+    h(
+      'div',
+      { class: 'new-menu-grid' },
+      ...IMPORT_MENU_ITEMS.map((item) => newMenuCard(item, onRefresh))
+    )
+  );
+
+  newMenuEl = panel;
+  document.body.append(panel);
+
+  const rect = anchor.getBoundingClientRect();
+  const panelRect = panel.getBoundingClientRect();
+  const left = Math.min(rect.left, window.innerWidth - panelRect.width - 8);
+
+  // 默认向下弹；下方放不下（例如按钮固定在侧栏底部）就翻到上方
+  let top = rect.bottom + 4;
+  if (top + panelRect.height + 8 > window.innerHeight) {
+    top = rect.top - panelRect.height - 4;
+  }
+  top = Math.min(top, window.innerHeight - panelRect.height - 8);
+
+  panel.style.left = `${Math.max(4, left)}px`;
+  panel.style.top = `${Math.max(4, top)}px`;
+
+  setTimeout(() => document.addEventListener('click', closeNewMenu, true), 0);
+}
+
+/**
+ * 顶部工具栏：只放「新建类」入口。
+ * 保存 / 另存为 / 删除已经下移到请求行右端（saveSplit，设计页在契约地址行），
+ * 因为它们与当前编辑对象强相关，跟着请求走比放在顶部更顺手。
+ */
 function editorToolbar(onRefresh) {
-  const hasSelection = Boolean(editor.selectedId);
-  const isFolder = editor.targetType === 'folder';
-  const isDoc = editor.targetType === 'doc';
-  const isApi = editor.targetType === 'api';
   // 没有任何项目时，新建接口/目录/文档都无处可落，直接禁用并给出引导
   const noProject = !editor.projectId;
+
+  const newBtn = h(
+    'button',
+    {
+      class: 'small primary',
+      disabled: noProject,
+      title: noProject ? '请先在「总览」页新建项目' : '新建或导入',
+      onclick: (e) => {
+        e.stopPropagation();
+        openNewMenu(newBtn, onRefresh);
+      }
+    },
+    '+ 新建'
+  );
 
   return h(
     'div',
     { class: 'editor-toolbar' },
-    h(
-      'button',
-      {
-        class: 'small',
-        disabled: noProject,
-        title: noProject ? '请先在「总览」页新建项目' : '新建接口',
-        onclick: () => openCreateDialog('api', onRefresh)
-      },
-      '+ 新建接口'
-    ),
-    h(
-      'button',
-      {
-        class: 'small',
-        disabled: noProject,
-        title: noProject ? '请先在「总览」页新建项目' : '新建目录',
-        onclick: () => openCreateDialog('folder', onRefresh)
-      },
-      '+ 新建目录'
-    ),
-    h(
-      'button',
-      {
-        class: 'small',
-        disabled: noProject,
-        title: noProject ? '请先在「总览」页新建项目' : '新建文档',
-        onclick: () => openCreateDialog('doc', onRefresh)
-      },
-      '+ 新建文档'
-    ),
+    newBtn,
     h(
       'button',
       {
@@ -4237,49 +5586,6 @@ function editorToolbar(onRefresh) {
         onclick: () => openAiDraftDialog(onRefresh)
       },
       '✦ AI 起草接口'
-    ),
-    h('span', { class: 'spacer-flex' }),
-    h('span', {
-      id: 'dirty-badge',
-      class: 'tag warn',
-      style: hasUnsaved() ? '' : 'display:none'
-    }, dirtyBadgeText()),
-    h(
-      'button',
-      {
-        class: 'primary small',
-        disabled: !hasSelection,
-        title: '保存（Ctrl+S）',
-        onclick: () => Promise.resolve(saveActiveMode(onRefresh)).catch((err) => toast(err.message, true))
-      },
-      saveButtonLabel()
-    ),
-    h(
-      'button',
-      {
-        class: 'small',
-        disabled: !hasSelection,
-        title: '复制一份到指定目录',
-        onclick: () => openSaveAs(onRefresh)
-      },
-      '另存为'
-    ),
-    h(
-      'button',
-      {
-        class: 'small danger',
-        disabled: !hasSelection,
-        onclick: async () => {
-          // 与右键菜单的删除共用同一套逻辑，避免两份实现行为不一致
-          await removeTarget({
-            target_id: editor.selectedId,
-            target_type: editor.targetType,
-            name: editor.data?.name || editor.selectedId
-          });
-          if (onRefresh) onRefresh();
-        }
-      },
-      '删除'
     )
   );
 }
@@ -4535,9 +5841,9 @@ function renderTreeNodes(nodes, depth = 0) {
         'data-type': node.target_type,
         title: node.url ? `${label}\n${node.url}` : label,
         onclick: async () => {
-          if (hasUnsaved() && !confirm('当前接口有未保存的修改（含用例 / Mock），确定切换？')) return;
+          // 打开到新标签页（已打开则激活），无需因未保存而阻拦——每个 tab 各自保留草稿
           try {
-            await loadApi(editor.projectId, node.target_id);
+            await openTab(editor.projectId, node.target_id);
             rerenderTree();
             rerenderPane();
           } catch (err) {
@@ -4692,83 +5998,601 @@ async function moveTreeNode(sourceId, targetNode, zone) {
 
 let ctxMenu = null;
 
-function closeTreeContextMenu() {
+function closeContextMenu() {
   if (!ctxMenu) return;
   ctxMenu.remove();
   ctxMenu = null;
-  document.removeEventListener('click', closeTreeContextMenu, true);
+  document.removeEventListener('click', closeContextMenu, true);
   document.removeEventListener('keydown', onCtxKeydown, true);
-  window.removeEventListener('resize', closeTreeContextMenu);
-  window.removeEventListener('scroll', closeTreeContextMenu, true);
+  window.removeEventListener('resize', closeContextMenu);
+  window.removeEventListener('scroll', closeContextMenu, true);
 }
 
 function onCtxKeydown(e) {
   if (e.key === 'Escape') {
     e.stopPropagation();
-    closeTreeContextMenu();
+    closeContextMenu();
   }
 }
 
-function ctxMenuItem(label, onClick, { danger = false, hint = '' } = {}) {
+/**
+ * 通用右键菜单底座：任意位置、任意菜单项。
+ * 调用方只负责拼 items（ctxMenuItem / ctxSubMenu），定位与关闭逻辑都在这里。
+ */
+function openContextMenu(x, y, items) {
+  closeContextMenu();
+
+  const node = h('div', { class: 'ctx-menu' }, ...items);
+  ctxMenu = node;
+  document.body.append(node);
+
+  // 视口内收边，避免贴边被裁掉
+  const rect = node.getBoundingClientRect();
+  const left = Math.min(x, window.innerWidth - rect.width - 8);
+  const top = Math.min(y, window.innerHeight - rect.height - 8);
+  node.style.left = `${Math.max(4, left)}px`;
+  node.style.top = `${Math.max(4, top)}px`;
+
+  // 右侧放不下子菜单时整体左翻，否则二级菜单会被挤出视口
+  if (rect.width > 0 && x + rect.width + 150 > window.innerWidth) {
+    node.classList.add('ctx-menu-flip');
+  }
+
+  document.addEventListener('click', closeContextMenu, true);
+  document.addEventListener('keydown', onCtxKeydown, true);
+  window.addEventListener('resize', closeContextMenu);
+  window.addEventListener('scroll', closeContextMenu, true);
+  return node;
+}
+
+/** 右键菜单图标（16px 线框 SVG，与 Apipost 风格一致） */
+const CTX_ICONS = {
+  open: 'M3 4h4l1.5 2H13v8H3z',
+  rename: 'M11 2l3 3-8 8H3v-3z',
+  copy: 'M6 2h6v2H6zM4 6h8v8H4z',
+  clone: 'M6 2h6v2H6zM4 6h8v8H4zM10 0v2',
+  paste: 'M5 2h6v3H5zM4 5h8v9H4z',
+  run: 'M4 2l9 6-9 6z',
+  share: 'M3 8v6h10V8M8 1v8M5 4l3-3 3 3',
+  curl: 'M2 4l4 4-4 4M8 12h6',
+  openapi: 'M3 3h4v4H3zM9 3h4v4H9zM6 9h4v4H6z',
+  branch: 'M4 3v10M4 8h5a3 3 0 003-3V3',
+  move: 'M2 6h4v6H2zM9 3h5v5',
+  edit: 'M11 2l3 3-8 8H3v-3z',
+  trash: 'M3 5h10M5 5V3h6v2M4 5l1 9h6l1-9',
+  close: 'M4 4l8 8M12 4l-8 8',
+  right: 'M6 3l5 5-5 5',
+  save: 'M3 3h8l2 2v8H3zM6 3v4h4V3M6 13v-3h4v3'
+};
+
+function ctxIcon(name) {
+  const path = CTX_ICONS[name];
+  if (!path) return h('span', { class: 'ctx-menu-icon' });
   return h(
-    'div',
-    {
-      class: `ctx-menu-item${danger ? ' danger' : ''}`,
-      title: hint,
-      onclick: (e) => {
-        e.stopPropagation();
-        closeTreeContextMenu();
-        Promise.resolve(onClick()).catch((err) => toast(err.message, true));
-      }
-    },
-    label
+    'span',
+    { class: 'ctx-menu-icon' },
+    h(
+      'svg',
+      {
+        viewBox: '0 0 16 16',
+        width: '16',
+        height: '16',
+        fill: 'none',
+        stroke: 'currentColor',
+        'stroke-width': '1.3',
+        'stroke-linecap': 'round',
+        'stroke-linejoin': 'round'
+      },
+      h('path', { d: path })
+    )
   );
 }
 
+/**
+ * 右键菜单项。
+ * disabled 时只弹原因、不执行动作——避免「点了没反应」的困惑。
+ */
+function ctxMenuItem(label, onClick, { danger = false, hint = '', icon = '', disabled = false } = {}) {
+  const cls = ['ctx-menu-item'];
+  if (danger) cls.push('danger');
+  if (disabled) cls.push('disabled');
+  return h(
+    'div',
+    {
+      class: cls.join(' '),
+      title: hint,
+      'aria-disabled': disabled ? 'true' : 'false',
+      onclick: (e) => {
+        e.stopPropagation();
+        if (disabled) {
+          toast(hint || `${label} 暂不可用`, true);
+          return;
+        }
+        closeContextMenu();
+        Promise.resolve(onClick()).catch((err) => toast(err.message, true));
+      }
+    },
+    ctxIcon(icon),
+    h('span', { class: 'ctx-menu-label' }, label)
+  );
+}
+
+/** 带子菜单的菜单项（悬停展开）；disabled 时不展开、只弹原因 */
+function ctxSubMenu(label, buildItems, { icon = '', itemsHost, disabled = false, hint = '' } = {}) {
+  const node = h(
+    'div',
+    {
+      class: `ctx-menu-item has-sub${disabled ? ' disabled' : ''}`,
+      title: hint,
+      'aria-disabled': disabled ? 'true' : 'false',
+      onclick: (e) => {
+        if (!disabled) return;
+        e.stopPropagation();
+        toast(hint || `${label} 暂不可用`, true);
+      }
+    },
+    ctxIcon(icon),
+    h('span', { class: 'ctx-menu-label' }, label),
+    h('span', { class: 'ctx-menu-arrow' }, '▸')
+  );
+  if (disabled) return node;
+
+  const host = itemsHost || h('div', { class: 'ctx-submenu' });
+  node.append(host);
+  node.addEventListener('mouseenter', () => {
+    if (!host.childElementCount) host.append(...buildItems());
+  });
+  return node;
+}
+
+/** 「移动至」的目录选择列表 */
+function moveTargets(node) {
+  const items = [];
+  items.push(
+    ctxMenuItem('根目录', async () => {
+      await applyMove(node, '0');
+    }, { icon: 'move' })
+  );
+  for (const f of folderOptionsWithDepth()) {
+    if (f.id === node.target_id) continue;
+    if (node.target_type === 'folder' && isSelfOrDescendant(f.id, node.target_id)) continue;
+    items.push(
+      ctxMenuItem(f.name, async () => {
+        await applyMove(node, f.id);
+      }, { icon: 'move' })
+    );
+  }
+  return items;
+}
+
+async function applyMove(node, targetParentId) {
+  if (String(node.parent_id || '0') === String(targetParentId)) {
+    toast('已经在目标位置');
+    return;
+  }
+  await api.post(`/projects/${editor.projectId}/apis/reorder`, {
+    items: [{ target_id: node.target_id, parent_id: String(targetParentId) }]
+  });
+  await loadTree(editor.projectId);
+  rerenderTree();
+  toast('已移动');
+}
+
+/**
+ * 把接口定义合成 curl 需要的请求结构（不需要真实响应）。
+ * @param {object} node 树节点
+ * @param {object} [dataOverride] 显式指定的接口数据（非活动标签页用它的快照）
+ */
+function requestFromDefinition(node, dataOverride) {
+  let data = dataOverride || null;
+  if (!data && editor.selectedId === node.target_id) data = editor.data;
+  data = data || {};
+  const req = data.request || {};
+
+  const headers = {};
+  for (const p of req.header?.parameter || []) {
+    if (!p || !p.key || Number(p.is_checked) === -1) continue;
+    headers[p.key] = p.value ?? '';
+  }
+
+  const body = req.body || {};
+  const mode = String(body.mode || 'none');
+  const bodyText = mode === 'form-data' || mode === 'urlencoded' ? '' : String(body.raw || '');
+
+  return {
+    method: String(data.method || node.method || 'GET').toUpperCase(),
+    url: String(data.url || node.url || ''),
+    headers,
+    body_mode: mode,
+    body: bodyText
+  };
+}
+
 function openTreeContextMenu(e, node) {
-  closeTreeContextMenu();
+  closeContextMenu();
   const items = [];
   const isFolder = node.target_type === 'folder';
-
-  items.push(ctxMenuItem('打开', async () => {
-    if (hasUnsaved() && !confirm('当前接口有未保存的修改（含用例 / Mock），确定切换？')) return;
-    await loadApi(editor.projectId, node.target_id);
-    rerenderTree();
-    rerenderPane();
-  }));
-
-  items.push(ctxMenuItem('重命名', () => {
-    const row = treeHost?.querySelector(`.tree-row[data-id="${cssEscape(node.target_id)}"]`);
-    if (row) startInlineRename(row, node);
-  }, { hint: '也可以双击名称直接改名' }));
-
-  items.push(ctxMenuItem('复制', () => duplicateTarget(node), { hint: '在同目录生成一份副本' }));
+  const refresh = () => window.__designRefresh?.();
 
   if (isFolder) {
+    // ---------- 目录菜单 ----------
+    items.push(
+      ctxSubMenu(
+        '新建',
+        () => [
+          ctxMenuItem('接口', () => openCreateDialog('api', refresh, { parentId: node.target_id }), { icon: 'open' }),
+          ctxMenuItem('目录', () => openCreateDialog('folder', refresh, { parentId: node.target_id }), { icon: 'open' }),
+          ctxMenuItem('文档', () => openCreateDialog('doc', refresh, { parentId: node.target_id }), { icon: 'open' })
+        ],
+        { icon: 'copy' }
+      )
+    );
+    items.push(
+      ctxMenuItem('粘贴接口/文本', () => openPasteImport(node), { icon: 'paste' })
+    );
     items.push(h('div', { class: 'ctx-menu-sep' }));
-    const refresh = () => window.__designRefresh?.();
-    items.push(ctxMenuItem('在此新建接口', () => openCreateDialog('api', refresh, { parentId: node.target_id })));
-    items.push(ctxMenuItem('在此新建目录', () => openCreateDialog('folder', refresh, { parentId: node.target_id })));
-    items.push(ctxMenuItem('在此新建文档', () => openCreateDialog('doc', refresh, { parentId: node.target_id })));
+    items.push(
+      ctxMenuItem('全部运行', () => runAllInFolder(node), { icon: 'run', hint: '串行执行该目录下全部接口' })
+    );
+    items.push(
+      ctxSubMenu(
+        '分享',
+        () => [
+          ctxMenuItem('复制文档链接', () => copyShareLink(node), { icon: 'share' }),
+          ctxMenuItem('打开只读文档页', () => openSharePage(node), { icon: 'open' })
+        ],
+        { icon: 'share' }
+      )
+    );
+    items.push(h('div', { class: 'ctx-menu-sep' }));
+    items.push(ctxSubMenu('移动至', () => moveTargets(node), { icon: 'move' }));
+    items.push(ctxMenuItem('复制', () => duplicateTarget(node), { icon: 'copy', hint: '仅复制目录自身，不含子内容' }));
+    items.push(
+      ctxMenuItem('编辑', () => {
+        openNode(node);
+      }, { icon: 'edit' })
+    );
+  } else {
+    // ---------- 接口 / 文档菜单 ----------
+    items.push(
+      ctxSubMenu(
+        '分享',
+        () => [
+          ctxMenuItem('复制文档链接', () => copyShareLink(node), { icon: 'share' }),
+          ctxMenuItem('打开只读文档页', () => openSharePage(node), { icon: 'open' })
+        ],
+        { icon: 'share' }
+      )
+    );
+    items.push(
+      ctxSubMenu(
+        '复制为 cURL',
+        () => [
+          ctxMenuItem('Bash', () => copyDefinitionAsCurl(node, 'bash'), { icon: 'curl' }),
+          ctxMenuItem('CMD', () => copyDefinitionAsCurl(node, 'cmd'), { icon: 'curl' })
+        ],
+        { icon: 'curl' }
+      )
+    );
+    items.push(
+      ctxMenuItem('外部调用 OpenAPI', () => copyTargetOpenApi(node), {
+        icon: 'openapi',
+        disabled: node.target_type !== 'api',
+        hint:
+          node.target_type === 'api'
+            ? '复制该接口的 OpenAPI 3 片段，可直接交给第三方或导入其他平台'
+            : '只有接口能导出 OpenAPI 片段'
+      })
+    );
+    items.push(h('div', { class: 'ctx-menu-sep' }));
+    items.push(ctxSubMenu('移动至', () => moveTargets(node), { icon: 'move' }));
+    items.push(ctxMenuItem('复制', () => duplicateTarget(node), { icon: 'copy', hint: '同目录生成一份副本' }));
+    items.push(ctxMenuItem('克隆', () => cloneTarget(node), { icon: 'clone', hint: '连子内容一起深拷贝到根目录' }));
   }
 
   items.push(h('div', { class: 'ctx-menu-sep' }));
-  items.push(ctxMenuItem('删除', () => removeTarget(node), { danger: true, hint: isFolder ? '目录会连同其下所有内容一起删除' : '' }));
+  items.push(
+    ctxMenuItem('删除', () => removeTarget(node), {
+      icon: 'trash',
+      danger: true,
+      hint: isFolder ? '目录会连同其下所有内容一起删除' : ''
+    })
+  );
 
-  ctxMenu = h('div', { class: 'ctx-menu' }, ...items);
-  document.body.append(ctxMenu);
+  openContextMenu(e.clientX, e.clientY, items);
+}
 
-  // 视口内收边，避免贴边被裁掉
-  const rect = ctxMenu.getBoundingClientRect();
-  const x = Math.min(e.clientX, window.innerWidth - rect.width - 8);
-  const y = Math.min(e.clientY, window.innerHeight - rect.height - 8);
-  ctxMenu.style.left = `${Math.max(4, x)}px`;
-  ctxMenu.style.top = `${Math.max(4, y)}px`;
+/* ---------------- 右键菜单动作 ---------------- */
 
-  document.addEventListener('click', closeTreeContextMenu, true);
-  document.addEventListener('keydown', onCtxKeydown, true);
-  window.addEventListener('resize', closeTreeContextMenu);
-  window.addEventListener('scroll', closeTreeContextMenu, true);
+/** 打开节点（右键菜单「编辑」与点击树行共用） */
+async function openNode(node) {
+  try {
+    await openTab(editor.projectId, node.target_id);
+    rerenderTree();
+    rerenderPane();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+/** 粘贴接口/文本：解析后落到指定目录 */
+function openPasteImport(node) {
+  const showModal = window.__consoleShowModal;
+  const closeModal = window.__consoleCloseModal;
+  const CP = window.CurlParse;
+  if (!showModal || !CP) {
+    toast('导入组件未加载，请刷新页面', true);
+    return;
+  }
+
+  const input = h('textarea', {
+    class: 'mono-input curl-input',
+    rows: 14,
+    placeholder: '粘贴 cURL 命令，或「方法 + URL + 请求头」形式的接口文本'
+  });
+  const hintLine = h('div', { class: 'form-hint' }, '识别多条会分别创建');
+
+  const submit = async () => {
+    const text = input.value.trim();
+    if (!text) {
+      toast('请先粘贴内容', true);
+      return;
+    }
+    let results = [];
+    try {
+      results = CP.parseAll(text, { dialect: 'auto' });
+    } catch (err) {
+      hintLine.textContent = `解析失败：${err.message}`;
+      hintLine.className = 'form-hint err';
+      return;
+    }
+    if (results.length === 0) {
+      hintLine.textContent = '没有识别到可导入的接口';
+      hintLine.className = 'form-hint err';
+      return;
+    }
+
+    try {
+      let ok = 0;
+      for (const parsed of results) {
+        const name = CP.suggestName(parsed);
+        const created = await api.post(`/projects/${editor.projectId}/apis`, {
+          name,
+          target_type: 'api',
+          method: parsed.method || 'GET',
+          url: parsed.url || '',
+          parent_id: String(node.target_id || '0')
+        });
+        const detail = await api.get(`/projects/${editor.projectId}/apis/${created.target_id}`);
+        const data = detail.data.data;
+        if (Array.isArray(parsed.headers)) data.request.header.parameter = parsed.headers;
+        if (Array.isArray(parsed.query)) data.request.query.parameter = parsed.query;
+        if (parsed.body_mode) {
+          data.request.body = {
+            ...(data.request.body || {}),
+            mode: parsed.body_mode,
+            raw: parsed.body_raw || '',
+            parameter: parsed.body_params || []
+          };
+        }
+        await api.put(`/projects/${editor.projectId}/apis/${created.target_id}`, { data });
+        ok += 1;
+      }
+      closeModal();
+      await loadTree(editor.projectId);
+      rerenderTree();
+      toast(`已导入 ${ok} 个接口`);
+    } catch (err) {
+      hintLine.textContent = err.message;
+      hintLine.className = 'form-hint err';
+    }
+  };
+
+  showModal(
+    `粘贴接口/文本${node?.name ? ` → ${node.name}` : ''}`,
+    h('div', { class: 'row-gap' }, input, hintLine),
+    [h('button', { onclick: () => closeModal() }, '取消'), h('button', { class: 'primary', onclick: submit }, '导入')]
+  );
+  input.focus();
+}
+
+/** 全部运行：串行执行目录下全部接口，带进度与停止 */
+async function runAllInFolder(node) {
+  const children = editor.apiIndex.filter(
+    (i) => String(i.parent_id || '0') === String(node.target_id) && i.target_type === 'api'
+  );
+  if (children.length === 0) {
+    toast('该目录下没有接口', true);
+    return;
+  }
+  if (!confirm(`将串行执行 ${children.length} 个接口，会发送真实请求。继续？`)) return;
+
+  const state = { aborted: false };
+  let ok = 0;
+  const failed = [];
+
+  const showModal = window.__consoleShowModal;
+  const closeModal = window.__consoleCloseModal;
+
+  const progress = h('div', { class: 'form-hint' }, `0 / ${children.length}`);
+  const bar = h('div', { class: 'run-progress-track' }, h('div', { class: 'run-progress-bar' }));
+  const stopBtn = h(
+    'button',
+    {
+      class: 'small danger',
+      onclick: () => {
+        state.aborted = true;
+        stopBtn.disabled = true;
+        stopBtn.textContent = '正在停止…';
+      }
+    },
+    '停止'
+  );
+
+  let modalOpen = true;
+  const finish = () => {
+    const summary = `成功 ${ok} / 失败 ${failed.length}`;
+    if (modalOpen) closeModal();
+    modalOpen = false;
+    toast(`全部运行完成：${summary}`);
+    if (failed.length > 0) {
+      showModal(
+        '执行结果',
+        h(
+          'div',
+          { class: 'row-gap' },
+          h('div', {}, summary),
+          ...failed.map((f) => h('div', { class: 'diff-row' }, h('span', { class: 'tag err' }, '失败'), h('span', {}, f.name)))
+        ),
+        [h('button', { onclick: () => closeModal() }, '关闭')]
+      );
+    }
+  };
+
+  if (showModal) {
+    showModal(
+      `全部运行 · ${node.name || node.target_id}`,
+      h('div', { class: 'row-gap' }, progress, bar, h('div', { class: 'btn-row' }, stopBtn)),
+      [h('button', { onclick: () => { state.aborted = true; } }, '关闭')]
+    );
+  }
+
+  for (let index = 0; index < children.length; index += 1) {
+    if (state.aborted) break;
+    const item = children[index];
+    progress.textContent = `${index} / ${children.length} 正在执行：${item.name || item.target_id}`;
+    bar.style.width = `${(index / children.length) * 100}%`;
+    try {
+      await api.post(`/projects/${editor.projectId}/apis/${item.target_id}/send`, {});
+      ok += 1;
+    } catch (err) {
+      failed.push({ name: item.name || item.target_id, error: err.message });
+    }
+    bar.style.width = `${((index + 1) / children.length) * 100}%`;
+    progress.textContent = `${index + 1} / ${children.length}`;
+  }
+
+  finish();
+}
+
+/** 克隆：整棵子树递归深拷贝到根目录 */
+async function cloneTarget(node) {
+  const copyName = `${nodeLabel(node)} - 副本`;
+
+  const recreate = async (sourceNode, parentId, name) => {
+    const created = await api.post(`/projects/${editor.projectId}/apis`, {
+      name,
+      target_type: sourceNode.target_type,
+      method: sourceNode.method || 'GET',
+      url: sourceNode.url || '',
+      parent_id: String(parentId)
+    });
+    const createdId = created.target_id;
+
+    if (sourceNode.target_type !== 'folder') {
+      try {
+        const fresh = await api.get(`/projects/${editor.projectId}/apis/${sourceNode.target_id}`);
+        if (fresh?.data) {
+          const payload = deepClone(fresh.data);
+          payload.name = name;
+          payload.parent_id = String(parentId);
+          payload.target_id = createdId;
+          await api.put(`/projects/${editor.projectId}/apis/${createdId}`, { data: payload });
+        }
+      } catch {}
+      return createdId;
+    }
+
+    // 目录：递归复制子节点
+    const children = editor.apiIndex.filter((i) => String(i.parent_id || '0') === String(sourceNode.target_id));
+    for (const child of children) {
+      await recreate(child, createdId, child.name || child.target_id);
+    }
+    return createdId;
+  };
+
+  try {
+    const rootId = await recreate(node, '0', copyName);
+    await loadTree(editor.projectId);
+    rerenderTree();
+    toast(`已克隆到根目录（${rootId === node.target_id ? '' : copyName}）`);
+  } catch (err) {
+    toast(`克隆失败：${err.message}`, true);
+  }
+}
+
+/**
+ * 复制为 cURL：从接口定义合成请求，不需要真实响应。
+ * @param {object} node 树节点 / 标签页描述
+ * @param {'bash'|'cmd'} dialect
+ * @param {object} [dataOverride] 非活动标签页用它的数据快照
+ */
+async function copyDefinitionAsCurl(node, dialect, dataOverride) {
+  const builder = window.CurlBuild;
+  if (!builder) {
+    toast('cURL 生成器未加载，请刷新页面', true);
+    return;
+  }
+  const req = requestFromDefinition(node, dataOverride);
+  const { text, warnings } = builder.buildCurl(req, { dialect });
+  const res = await copyText(text);
+  if (!res.ok) {
+    toastCopyFailed(res.error);
+    return;
+  }
+  toast(warnings.length > 0 ? `已复制（${warnings[0]}）` : `已复制为 cURL（${dialect === 'cmd' ? 'CMD' : 'Bash'}）`);
+}
+
+/* ---------------- 分享 / 外部调用 OpenAPI ---------------- */
+
+/**
+ * 只读文档页链接。
+ * 复用服务端 /doc 路由，带 api= 或 folder= 参数把范围收窄到单个接口/目录。
+ */
+function docShareUrl(node) {
+  const token = new URLSearchParams(location.search).get('ui') || '';
+  const key = node.target_type === 'folder' ? 'folder' : 'api';
+  const base = `${location.origin}/doc?project=${encodeURIComponent(editor.projectId)}`;
+  return `${base}&${key}=${encodeURIComponent(node.target_id)}&ui=${encodeURIComponent(token)}`;
+}
+
+/** 分享：复制只读文档链接 */
+async function copyShareLink(node) {
+  const res = await copyText(docShareUrl(node));
+  if (!res.ok) {
+    toastCopyFailed(res.error);
+    return;
+  }
+  toast('已复制只读文档链接（本机服务运行期间有效）');
+}
+
+/** 分享：在新窗口打开只读文档页 */
+function openSharePage(node) {
+  window.open(docShareUrl(node), '_blank', 'noopener');
+}
+
+/**
+ * 外部调用 OpenAPI：只导出该接口的 OpenAPI 3 片段。
+ * 复用服务端 export 路由的 api= 过滤，避免在前端重复实现一遍转换。
+ */
+async function copyTargetOpenApi(node) {
+  if (node.target_type !== 'api') {
+    toast('只有接口能导出 OpenAPI 片段', true);
+    return;
+  }
+  const qs = `format=openapi&api=${encodeURIComponent(node.target_id)}`;
+  const spec = await api.get(`/projects/${editor.projectId}/export?${qs}`);
+  const paths = spec?.paths || {};
+  if (Object.keys(paths).length === 0) {
+    toast('该接口还没有 URL，无法生成 OpenAPI 片段', true);
+    return;
+  }
+  const res = await copyText(JSON.stringify(spec, null, 2));
+  if (!res.ok) {
+    toastCopyFailed(res.error);
+    return;
+  }
+  toast('已复制 OpenAPI 3 片段');
 }
 
 /** 转义 target_id 以便用在 querySelector 里（id 里可能有特殊字符） */
@@ -4925,47 +6749,55 @@ async function removeTarget(node) {
 }
 
 let treeHost = null;
+/** 树末尾的「+ 新建」按钮（随列表滚动），由 viewApiDesign 创建后交由 rerenderTree 挂载 */
+let treeNewBtn = null;
 
 function rerenderTree() {
   if (!treeHost) return;
   const filtered = filterTree(editor.tree, editor.treeKeyword);
   const nodes = renderTreeNodes(filtered);
-  if (nodes.length === 0) {
+  const tail = treeNewBtn ? [treeNewBtn] : [];
+
+  if (nodes.length > 0) {
+    treeHost.replaceChildren(...nodes, ...tail);
+    return;
+  }
+
+  if (!editor.projectId) {
     // 没有项目时，引导去总览页建项目（否则用户点新建必然失败）
-    if (!editor.projectId) {
-      treeHost.replaceChildren(
+    treeHost.replaceChildren(
+      h(
+        'div',
+        { class: 'empty' },
+        '还没有项目。',
         h(
           'div',
-          { class: 'empty' },
-          '还没有项目。',
+          { class: 'mt12' },
           h(
-            'div',
-            { class: 'mt12' },
-            h(
-              'button',
-              {
-                class: 'small primary',
-                onclick: () => {
-                  const st = window.__consoleState;
-                  if (st) {
-                    st.view = 'overview';
-                    window.__consoleRender?.();
-                  }
+            'button',
+            {
+              class: 'small primary',
+              onclick: () => {
+                const st = window.__consoleState;
+                if (st) {
+                  st.view = 'overview';
+                  window.__consoleRender?.();
                 }
-              },
-              '去新建项目'
-            )
+              }
+            },
+            '去新建项目'
           )
         )
-      );
-      return;
-    }
-    treeHost.replaceChildren(
-      h('div', { class: 'empty' }, editor.treeKeyword ? '没有匹配的接口' : '还没有接口，点上方新建')
+      ),
+      ...tail
     );
     return;
   }
-  treeHost.replaceChildren(...nodes);
+
+  treeHost.replaceChildren(
+    h('div', { class: 'empty' }, editor.treeKeyword ? '没有匹配的接口' : '还没有接口，点下方「+ 新建」'),
+    ...tail
+  );
 }
 
 /* ---------------- 主视图 ---------------- */
@@ -4986,6 +6818,9 @@ function viewApiDesign() {
         editor.projectId = e.target.value;
         editor.selectedId = null;
         editor.data = null;
+        // 标签页只在当前项目内有效：换项目后全部关闭，避免带着别的项目的 id
+        editor.tabs = [];
+        editor.activeTabId = null;
         // 换项目后旧的搜索词与折叠状态都没有意义
         editor.treeKeyword = '';
         editor.collapsed.clear();
@@ -4999,6 +6834,7 @@ function viewApiDesign() {
           renderTopbarEnvs();
         }
         await refreshDesign();
+        renderTabBar();
       }
     },
     ...state.projects.map((p) =>
@@ -5008,6 +6844,13 @@ function viewApiDesign() {
 
   treeHost = h('div', { class: 'design-tree' });
   paneHost = h('div', { class: 'design-editor-pane' });
+  // 接口工作区需要占满高度做左右分栏；文档/目录仍是普通滚动布局
+  const syncPaneHostMode = () => {
+    const isWorkspace = editor.targetType === 'api' && (editor.activeMode || 'design') === 'debug';
+    paneHost.classList.toggle('ws-host', isWorkspace);
+  };
+  syncPaneHostMode();
+  window.__syncPaneHostMode = syncPaneHostMode;
 
   // 树搜索：防抖后只重绘树，不影响编辑器
   let searchTimer = null;
@@ -5033,6 +6876,22 @@ function viewApiDesign() {
   // 绑定 Ctrl+S
   bindSaveShortcut(refresh);
 
+  // 树末尾的「+ 新建」：跟在最后一个节点后面，像 Apipost 一样长在列表里
+  treeNewBtn = h(
+    'button',
+    {
+      class: 'tree-new-btn',
+      disabled: state.projects.length === 0,
+      title: state.projects.length === 0 ? '请先在「总览」页新建项目' : '新建或导入',
+      onclick: (e) => {
+        e.stopPropagation();
+        openNewMenu(treeNewBtn, refresh);
+      }
+    },
+    h('span', { class: 'tree-new-plus' }, '+'),
+    h('span', { class: 'tree-new-label' }, '新建')
+  );
+
   const container = h(
     'div',
     { class: 'design-layout' },
@@ -5051,6 +6910,7 @@ function viewApiDesign() {
     h(
       'section',
       { class: 'design-main' },
+      h('div', { class: 'editor-tabs', id: 'editor-tabs' }),
       editorToolbar(refresh),
       paneHost
     )
@@ -5062,12 +6922,13 @@ function viewApiDesign() {
     refreshDesign()
       .then(() => {
         const first = editor.apiIndex.find((i) => i.target_type === 'api');
-        if (first) return loadApi(editor.projectId, first.target_id);
+        if (first) return openTab(editor.projectId, first.target_id);
         return null;
       })
       .then(() => {
         rerenderTree();
         rerenderPane();
+        renderTabBar();
         const toolbar = container.querySelector('.editor-toolbar');
         if (toolbar) toolbar.replaceWith(editorToolbar(refresh));
       })
@@ -5076,6 +6937,7 @@ function viewApiDesign() {
     setTimeout(() => {
       rerenderTree();
       rerenderPane();
+      renderTabBar();
     }, 0);
   }
 
@@ -5111,6 +6973,30 @@ window.ApiDesign = {
   textarea,
   scriptSource,
   setScriptSource,
+  /** 共享给 workspace.js 的工作区组件 */
+  modeTabs,
+  requestBar,
+  metaBar,
+  statusSelector,
+  tagsEditor,
+  descriptionField,
+  folderOptionsWithDepth,
+  tabParams,
+  tabBody,
+  tabAuth,
+  tabResponse,
+  tabScripts,
+  contractTable,
+  contractSection,
+  openBulkEdit,
+  buildResponseBody,
+  formatSize,
+  truncateUrl,
+  copyAsCurl,
+  openCodeSnippet,
+  saveAsExample,
+  markDirty,
+  rerenderPane,
   /** 从「最近」等外部入口跳到指定接口 */
   openTarget: async (projectId, targetId) => {
     editor.projectId = projectId;
@@ -5132,5 +7018,8 @@ window.addEventListener('beforeunload', (e) => {
   e.preventDefault();
   e.returnValue = '';
 });
+
+/** workspace.js 的响应区通过它渲染「响应示例」页签 */
+window.__responseExamplePane = responseExamplePane;
 
 })();

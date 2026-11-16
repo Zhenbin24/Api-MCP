@@ -393,3 +393,277 @@ test('MCP execute_api 不返回 live_detail', async () => {
     cleanup(env.base);
   }
 });
+
+/* ---------------- 分阶段耗时 ---------------- */
+
+test('send：返回 8 段分阶段耗时', async () => {
+  const { env, fake, instance, req } = await boot();
+  try {
+    await pointEnvTo(req, env, fake);
+    const id = await makeApi(req, env, fake, { name: 'ping', method: 'GET', path: '/users/42' });
+
+    const res = await req('POST', `/api/projects/${env.projectId}/apis/${id}/send`, {});
+    assert.equal(res.status, 200);
+
+    const t = res.data.timings;
+    assert.ok(t, '应返回 timings');
+    for (const key of [
+      'request_ms',
+      'socket_ms',
+      'lookup_ms',
+      'connect_ms',
+      'tls_ms',
+      'waiting_ms',
+      'download_ms',
+      'total_ms'
+    ]) {
+      assert.equal(typeof t[key], 'number', `缺少计时字段 ${key}`);
+      assert.ok(t[key] >= 0, `${key} 不应为负`);
+    }
+    assert.equal(typeof t.redirects, 'number');
+
+    // live_detail 里也要带上，供响应区展开
+    assert.ok(res.data.live_detail.response.timings, 'live_detail 应带 timings');
+
+    // 落盘记录同样保留（供「最近」里回看）
+    const { openProject } = await import('../src/store/target.js');
+    const { getRun } = await import('../src/store/runs.js');
+    const target = openProject({ dataRoot: env.root, projectId: env.projectId });
+    const run = getRun(target, res.data.run_id);
+    assert.ok(run.steps[0].timings, '落盘记录应保留 timings');
+  } finally {
+    await instance.close();
+    await fake.close();
+    cleanup(env.base);
+  }
+});
+
+/* ---------------- 可视化断言 ---------------- */
+
+function assertTask(data, extra = {}) {
+  return {
+    id: `as_${Math.random().toString(16).slice(2, 10)}`,
+    type: 'assert',
+    name: '',
+    enabled: 1,
+    data,
+    ...extra
+  };
+}
+
+test('send：post_tasks 里的可视化断言被执行并通过', async () => {
+  const { env, fake, instance, req } = await boot();
+  try {
+    await pointEnvTo(req, env, fake);
+    const id = await makeApi(req, env, fake, { name: 'ping', method: 'GET', path: '/users/42' });
+
+    const detail = await req('GET', `/api/projects/${env.projectId}/apis/${id}`);
+    const data = detail.data.data;
+    data.response.is_check_result = -1; // 只用可视化断言
+    data.request.post_tasks = [
+      assertTask({ source: 'status_code', condition: 'equal', value: '200' }, { name: '状态码 200' }),
+      assertTask({ source: 'response_json', expression: '$.name', condition: 'equal', value: 'alice' }, { name: '用户名' }),
+      assertTask({ source: 'response_json', expression: '$.id', condition: 'gt', value: '10' }, { name: 'ID 大于 10' })
+    ];
+    await req('PUT', `/api/projects/${env.projectId}/apis/${id}`, { data });
+
+    const res = await req('POST', `/api/projects/${env.projectId}/apis/${id}/send`, {});
+    assert.equal(res.data.status, 'passed', JSON.stringify(res.data.assertions));
+
+    const visual = res.data.assertions.filter((a) => a.phase === 'assert');
+    assert.equal(visual.length, 3, '三条断言都应执行');
+    assert.ok(visual.every((a) => a.passed), JSON.stringify(visual));
+
+    // 断言对象带期望值 / 实际值，供响应区对比
+    const nameAssert = visual.find((a) => a.name === '用户名');
+    assert.equal(nameAssert.expected, 'alice');
+    assert.equal(nameAssert.actual, 'alice');
+    assert.equal(nameAssert.source, 'response_json');
+    assert.equal(nameAssert.expression, '$.name');
+  } finally {
+    await instance.close();
+    await fake.close();
+    cleanup(env.base);
+  }
+});
+
+test('send：可视化断言失败时整体标记为 failed', async () => {
+  const { env, fake, instance, req } = await boot();
+  try {
+    await pointEnvTo(req, env, fake);
+    const id = await makeApi(req, env, fake, { name: 'ping', method: 'GET', path: '/users/42' });
+
+    const detail = await req('GET', `/api/projects/${env.projectId}/apis/${id}`);
+    const data = detail.data.data;
+    data.response.is_check_result = -1;
+    data.request.post_tasks = [
+      assertTask({ source: 'response_json', expression: '$.name', condition: 'equal', value: 'bob' }, { name: '用户名应为 bob' })
+    ];
+    await req('PUT', `/api/projects/${env.projectId}/apis/${id}`, { data });
+
+    const res = await req('POST', `/api/projects/${env.projectId}/apis/${id}/send`, {});
+    assert.equal(res.data.status, 'failed');
+
+    const failed = res.data.assertions.find((a) => a.phase === 'assert');
+    assert.equal(failed.passed, false);
+    assert.equal(failed.actual, 'alice');
+    assert.match(String(failed.message || res.data.error), /bob/);
+  } finally {
+    await instance.close();
+    await fake.close();
+    cleanup(env.base);
+  }
+});
+
+test('send：禁用的断言（enabled=-1）不执行', async () => {
+  const { env, fake, instance, req } = await boot();
+  try {
+    await pointEnvTo(req, env, fake);
+    const id = await makeApi(req, env, fake, { name: 'ping', method: 'GET', path: '/users/42' });
+
+    const detail = await req('GET', `/api/projects/${env.projectId}/apis/${id}`);
+    const data = detail.data.data;
+    data.response.is_check_result = -1;
+    data.request.post_tasks = [
+      assertTask({ source: 'status_code', condition: 'equal', value: '999' }, { name: '禁用的断言', enabled: -1 })
+    ];
+    await req('PUT', `/api/projects/${env.projectId}/apis/${id}`, { data });
+
+    const res = await req('POST', `/api/projects/${env.projectId}/apis/${id}/send`, {});
+    assert.equal(res.data.status, 'passed', '被禁用的断言不应影响结果');
+    assert.equal(res.data.assertions.filter((a) => a.phase === 'assert').length, 0);
+  } finally {
+    await instance.close();
+    await fake.close();
+    cleanup(env.base);
+  }
+});
+
+test('send：可视化断言与自定义脚本共存，互不干扰', async () => {
+  const { env, fake, instance, req } = await boot();
+  try {
+    await pointEnvTo(req, env, fake);
+    const id = await makeApi(req, env, fake, { name: 'ping', method: 'GET', path: '/users/42' });
+
+    const detail = await req('GET', `/api/projects/${env.projectId}/apis/${id}`);
+    const data = detail.data.data;
+    data.response.is_check_result = -1;
+    data.request.post_tasks = [
+      { id: 's1', type: 'customScript', enabled: 1, name: '', data: 'apt.environment.set("fromScript", "yes");' },
+      assertTask({ source: 'status_code', condition: 'equal', value: '200' }, { name: '断言一' })
+    ];
+    await req('PUT', `/api/projects/${env.projectId}/apis/${id}`, { data });
+
+    const res = await req('POST', `/api/projects/${env.projectId}/apis/${id}/send`, {});
+    assert.equal(res.data.status, 'passed', JSON.stringify(res.data.assertions));
+
+    // 脚本写入了变量，断言照常执行
+    assert.equal(res.data.variables.fromScript, 'yes');
+    assert.equal(res.data.assertions.filter((a) => a.phase === 'assert').length, 1);
+  } finally {
+    await instance.close();
+    await fake.close();
+    cleanup(env.base);
+  }
+});
+
+test('send：旧 is_check_result 结构校验路径保持有效（未迁移的接口行为不变）', async () => {
+  const { env, fake, instance, req } = await boot();
+  try {
+    await pointEnvTo(req, env, fake);
+    const id = await makeApi(req, env, fake, { name: 'ping', method: 'GET', path: '/users/42' });
+
+    const detail = await req('GET', `/api/projects/${env.projectId}/apis/${id}`);
+    const data = detail.data.data;
+    // 保持 is_check_result = 1，且不配置任何可视化断言
+    data.response.is_check_result = 1;
+    data.response.example = [
+      {
+        example_id: '1',
+        expect: { code: '200', content_type: 'json', is_default: 1, verify_type: 'schema', name: '成功' },
+        raw: '',
+        raw_parameter: []
+      }
+    ];
+    data.request.post_tasks = [];
+    await req('PUT', `/api/projects/${env.projectId}/apis/${id}`, { data });
+
+    const res = await req('POST', `/api/projects/${env.projectId}/apis/${id}/send`, {});
+    assert.equal(res.data.status, 'passed', JSON.stringify(res.data.assertions));
+
+    // 旧路径的断言 phase 是 schema，且依然生效
+    const legacy = res.data.assertions.filter((a) => a.phase === 'schema');
+    assert.ok(legacy.length > 0, '旧的结构校验应仍然产生断言');
+    assert.ok(legacy.every((a) => a.passed));
+  } finally {
+    await instance.close();
+    await fake.close();
+    cleanup(env.base);
+  }
+});
+
+/* ---------------- 失败请求 ---------------- */
+
+test('send：域名解析失败时返回 200 与错误信息，而不是 500', async () => {
+  const { env, fake, instance, req } = await boot();
+  try {
+    // 指向一个必然解析不到的域名，模拟 getaddrinfo ENOTFOUND
+    const api = await req('POST', `/api/projects/${env.projectId}/apis`, {
+      name: 'dns-fail',
+      target_type: 'api',
+      method: 'GET',
+      url: 'https://no-such-host.invalid/api'
+    });
+    const id = api.data.target_id;
+
+    const res = await req('POST', `/api/projects/${env.projectId}/apis/${id}/send`, {});
+    // 关键：路由不能因为未声明的 live 变量抛 ReferenceError 变成 500
+    assert.equal(res.status, 200, `期望 200，实际 ${res.status}：${JSON.stringify(res.data)}`);
+    assert.equal(res.data.status, 'failed');
+    assert.match(String(res.data.error || ''), /请求失败/);
+    assert.match(String(res.data.error || ''), /ENOTFOUND|EAI_AGAIN|no-such-host/);
+    assert.equal(res.data.response, null, '失败时不应有 response');
+    // 失败也会带回实际请求，供响应区展示
+    assert.ok(res.data.request, '失败时应保留实际请求详情');
+    assert.match(String(res.data.request.url || ''), /no-such-host/);
+  } finally {
+    await instance.close();
+    await fake.close();
+    cleanup(env.base);
+  }
+});
+
+test('send：未解析的 {{变量}} 会在控制台里给出 warning', async () => {
+  const { env, fake, instance, req } = await boot();
+  try {
+    await pointEnvTo(req, env, fake);
+    const api = await req('POST', `/api/projects/${env.projectId}/apis`, {
+      name: 'unknown-var',
+      target_type: 'api',
+      method: 'GET',
+      url: '{{base}}/users/42'
+    });
+    const id = api.data.target_id;
+
+    const detail = await req('GET', `/api/projects/${env.projectId}/apis/${id}`);
+    const data = detail.data.data;
+    data.request.header.parameter = [
+      { key: 'X-Token', value: '{{missing-token}}', field_type: 'String', is_checked: 1, not_null: -1, param_id: 'h1' }
+    ];
+    await req('PUT', `/api/projects/${env.projectId}/apis/${id}`, { data });
+
+    const res = await req('POST', `/api/projects/${env.projectId}/apis/${id}/send`, {});
+    const logs = res.data.console || [];
+    const warned = logs.find((l) => l.level === 'warn' && /未解析的变量/.test(l.message));
+    assert.ok(warned, `应给出未解析变量告警，实际日志：${JSON.stringify(logs)}`);
+    assert.match(warned.message, /missing-token/);
+    // 行为保持：占位符原样发出，不静默清空（live_detail 是未脱敏的即时详情）
+    const sentHeaders = res.data.live_detail?.request?.headers || {};
+    assert.equal(sentHeaders['X-Token'], '{{missing-token}}');
+  } finally {
+    await instance.close();
+    await fake.close();
+    cleanup(env.base);
+  }
+});
+

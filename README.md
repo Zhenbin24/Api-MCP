@@ -7,13 +7,19 @@ Windows 版本地 API 设计与调试工具，内置 MCP 服务。自带数据�
 - **34 个工具** — `apimcp_list_projects` … `apimcp_export_project`
 - **开箱即用** — 首次启动自动建好数据目录和一个「默认项目」，打开就能写接口
 - **导入导出** — 导入 OpenAPI 3.x / Swagger 2.0 / Postman Collection v2.1 / HAR / cURL，以及 AI 解析任意文本与请求代码；导出 OpenAPI 3.0（JSON / YAML）、Postman v2.1、Markdown、HTML、Word
-- **可视化接口编辑器** — 控制台内直接新建/编辑/删除接口、目录、文档，含参数表、Body、鉴权、前后置脚本、响应示例
-- **接口树交互对齐 Apipost** — 双击就地改名、右键菜单（打开 / 重命名 / 复制 / 删除 / 在此新建）、搜索过滤、目录折叠、拖拽排序与跨目录移动
+- **设计与调试分离** — 「设计」页只定义契约（参数表含类型 / 必填 / 示例值 / 描述、Body 结构、响应结构），不发送请求；「调试」页上下分栏（上方请求构建区 + 下方常驻响应区），真实发送并查看结果
+- **顶部多标签页** — 多个接口同时打开、随时切换与关闭，每个标签页各自保留未保存草稿
+- **接口树交互对齐 Apipost** — 双击就地改名、右键菜单（目录与接口两套，带图标与分组）、搜索过滤、目录折叠、拖拽排序与跨目录移动
+- **8 个请求页签** — Header / Query / Path / Body / 认证 / Cookie / 预执行操作 / 后执行操作，页签上带启用参数计数
+- **form-data 结构化编辑** — 表头对齐的参数表，值列内嵌类型下拉，支持文件选择与逐字段内容类型
+- **可视化断言** — 12 种数据源 × 15 种条件，配置在「后执行操作」里，结果在响应区就地展示
+- **分阶段耗时** — 点响应耗时展开 8 段明细（Request / Socket / Lookup / Connect / SecureConnect / Response / End / Done）
 - **代码生成** — 一键把当前请求转成 cURL / fetch / axios / Python / Go / Java 六种可运行代码
 - **自动化测试** — 执行计划编排，支持条件 / 次数 / While / 等待 / 脚本五种控制器任意嵌套，运行后输出可视化报告
 - **AI 辅助（可选）** — 兼容 OpenAI 风格的任意服务：AI 解析导入、AI 起草接口、AI 生成测试用例
 - **环境管理** — 多环境切换、环境变量、多 host 服务（前置 URL）；目录可指定服务，其下接口优先使用
-- **全局参数与全局变量** — 全局 / 目录 / 接口三层继承（Header、Query、Body、鉴权、前后置脚本），环境变量优先于全局变量；Cookie 统一写在 Header 的 `Cookie` 键
+- **全局参数与全局变量** — 全局 / 目录 / 接口三层继承（Header、Query、Body、鉴权、前后置脚本），环境变量优先于全局变量
+- **参数批量编辑** — 贴一段「参数名: 参数值」或扁平 JSON，左侧输入右侧实时预览，支持命名风格转换
 - **完整 apt 脚本沙箱** — `apt.environment/globals/variables`、`setRequestHeader/Query/Body`、`response.json/text`、`cookies`、`apt.test/apt.expect`
 - **Apipost 同款主题** — 暖纸金（默认）/ 暗色 / 自定义底色，配色取自 Apipost 主题 token
 - **双模式** — 常驻 HTTP 服务（含 Web 控制台）+ `--stdio`（供 MCP 客户端直连）
@@ -36,8 +42,13 @@ Windows 版本地 API 设计与调试工具，内置 MCP 服务。自带数据�
 
 | 我想… | 去哪 |
 |---|---|
-| 写接口、改参数、发请求 | 接口设计 → 设计 / 调试 |
+| 写接口、改参数、发请求 | 接口设计 → 设计（定义契约）/ 调试（发送与看响应） |
+| 同时编辑多个接口 | 接口设计：点左树打开到新标签页，顶部标签栏随时切换 |
 | 改接口名、删除、复制、拖到别的目录 | 接口设计左树：双击改名、右键菜单、拖拽 |
+| 把接口定义复制成 cURL | 接口设计左树右键接口 → 复制为 cURL |
+| 按文本批量录入参数 | 任一参数区标题右侧「批量编辑」 |
+| 给接口加校验 | 接口设计 → 调试 → 后执行操作 → 断言 |
+| 看各阶段网络耗时 | 接口设计 → 调试：点响应区的耗时数字 |
 | 把请求转成 Java / Go / Python 代码 | 接口设计 → 调试 → 生成代码 |
 | 把多个接口串成流程、加条件与循环 | 自动化测试 |
 | 把文档发给别人 | 导入导出 → 导出 Markdown / HTML / Word，或「打开文档页」打印成 PDF |
@@ -192,15 +203,16 @@ ApiMCP-Desktop.exe --port 39101
 
 ### Cookie 写法
 
-Cookie 不再有独立的参数表（接口 / 目录 / 全局参数三处界面都只保留 Query、Path、Header），统一写成一条 Header：
+两种写法都支持，但**不要同时用**：
 
-| Key | Value |
-|---|---|
-| `Cookie` | `a=1; b=2` |
+| 方式 | 位置 | 说明 |
+|---|---|---|
+| Cookie 参数表 | 接口 / 目录 / 全局参数的「Cookie」页签 | 按 key-value 逐条填写，发送时拼成一条 `Cookie` 头 |
+| Header 的 `Cookie` 键 | 任一参数区的 Header 表 | 直接写 `a=1; b=2` |
+
+**冲突规则**：执行层只在**没有** `Cookie` 请求头时才用 Cookie 表拼头（`src/exec/http.js`）。两者同时存在时以 Header 为准，Cookie 表静默不生效——界面会在 Cookie 页签顶部显示黄条提示，并提供「删掉 Header Cookie」与「迁到 Cookie 表」两个按钮。
 
 粘贴 cURL（`-b` / `--cookie` / `-H 'Cookie: ...'`）或导入 OpenAPI 时，cookie 会自动合并成一条 `Cookie` 请求头。
-
-历史数据里的 Cookie 参数不会自动迁移：界面会用提示块列出，可「复制为 Cookie 头」粘到 Header 后再「清空历史 Cookie 参数」。在这些数据清空之前，它们仍会在发送时合并进 `Cookie` 头。
 
 ### 跨步骤传值
 
@@ -228,7 +240,7 @@ npm run build:desktop  # → dist/desktop/ApiMCP-Desktop-win32-x64/ + 同名 zip
 
 改完 `web/` 下的任何文件后必须重跑 `npm run build`（或 `node scripts/gen-assets.mjs`），因为控制台资源是内联进 exe 的。
 
-新增前端脚本要同步改三处：`web/index.html` 的 script 标签、`scripts/gen-assets.mjs` 的 `files` 数组、`src/server/serve.js` 里静态资源路由的正则。
+新增前端脚本要同步改三处：`web/index.html` 的 script 标签、`scripts/gen-assets.mjs` 的 `files` 数组、`src/server/serve.js` 里静态资源路由的正则。当前脚本清单：`app.js` / `design.js` / `workspace.js` / `envvars.js` / `transfer.js` / `extra.js` / `recent.js` / `automation.js` / `curl-parse.js` / `curl-build.js` / `codegen.js`。
 
 ## 接口树交互
 
@@ -236,21 +248,187 @@ npm run build:desktop  # → dist/desktop/ApiMCP-Desktop-win32-x64/ + 同名 zip
 
 | 手势 | 行为 |
 |---|---|
-| 单击 | 打开该接口 / 目录 / 文档 |
+| 单击 | 打开到新标签页（已打开则激活） |
 | **双击名称** | 就地改名，回车或失焦立即落库，Esc 取消 |
-| **右键** | 弹出菜单：打开、重命名、复制、删除；目录额外提供「在此新建接口 / 目录 / 文档」 |
+| **右键** | 弹出菜单（见下表） |
 | 拖拽 | 拖到目录行中间 = 移入该目录；拖到行的上 / 下缘 = 同级插入前后；禁止把目录拖进自己的子树 |
 | 点折叠箭头 | 收起 / 展开该目录（重绘后保持） |
 
 顶部搜索框按名称、URL、方法或 ID 过滤，命中的节点会连同祖先链一起保留；没有命中时显示「没有匹配的接口」。
 
-「复制」是在同目录生成一份「xxx 副本」，参数、Body、鉴权、脚本、用例与 Mock 一并复制（目录只复制自身，不含子项），不经过剪贴板。
+树栏底部常驻的「+ 新建」跟随列表最后一行，滚到底就能看到——它像普通节点一样参与树的排布，不额外占用侧栏高度。
 
-元信息栏的字段顺序是：**接口名称 → 状态 → 目录 → 标签**。改「接口名称」时侧栏标题实时跟随，与「基础 → 名称」三处始终一致。
+### 右键菜单
+
+目录与接口是两套不同的菜单，均带图标与分组分割线。
+
+**目录**
+
+| 项 | 说明 |
+|---|---|
+| 新建 ▸ | 子菜单：接口 / 目录 / 文档 |
+| 粘贴接口/文本 | 粘贴内容解析后在该目录下创建 |
+| 全部运行 | 串行执行该目录下全部接口，带 `N/M` 进度与「停止」 |
+| 分享 ▸ | 子菜单：复制文档链接 / 打开只读文档页（导出该目录及其子目录） |
+| 移动至 ▸ | 子菜单列出全部目录，选中即移动 |
+| 复制 | 仅复制目录自身，不含子内容 |
+| 编辑 | 打开该目录 |
+| 删除 | 连同其下所有内容一起删除 |
+
+**接口 / 文档**
+
+| 项 | 说明 |
+|---|---|
+| 分享 ▸ | 子菜单：复制文档链接 / 打开只读文档页（只含该接口） |
+| 复制为 cURL ▸ | 子菜单：Bash / CMD，直接从接口定义合成，无需先发一次请求 |
+| 外部调用 OpenAPI | 复制该接口的 OpenAPI 3 片段，可直接交给第三方或导入其他平台 |
+| 移动至 ▸ | 子菜单列出全部目录 |
+| 复制 | 同目录生成一份「xxx 副本」 |
+| 克隆 | 连同子内容递归深拷贝到根目录 |
+| 删除 | danger |
+
+置灰项鼠标悬停会显示具体原因，点击只弹提示、不执行动作——避免「点了没反应」的困惑。
+
+「分享」生成的链接指向本机的只读文档页（`/doc?project=...&api=...`），只在本地服务运行期间有效；它不含云端协作能力。
+
+### 标签页
+
+顶部标签栏的操作：
+
+| 手势 | 行为 |
+|---|---|
+| 单击 | 切换到该标签 |
+| 点 `×` | 关闭该标签（有未保存改动会确认） |
+| **右键** | 关闭 / 关闭其他 / 关闭右侧 / 复制名称 / 复制接口 URL / 复制为 cURL ▸ |
+| 右端 `⋯` | 关闭所有标签 / 强制关闭所有标签 / 关闭其他标签 / 强制关闭其他所有标签 / 保存所有标签 |
+
+「强制关闭」跳过未保存确认。「保存所有标签」会把所有标签的设计域一起落库；用例与 Mock 草稿只存在于当前激活的接口，那部分需要切过去单独保存。
+
+### 复制 / 克隆 / 另存为的区别
+
+| 动作 | 范围 | 落点 |
+|---|---|---|
+| 复制 | 仅自身（目录不带子内容） | 同目录 |
+| 克隆 | 整棵子树递归深拷贝 | 根目录 |
+| 另存为（保存按钮下拉） | 仅自身 | 用户选择的目标目录 |
+
+「复制」与「克隆」的参数、Body、鉴权、脚本、用例与 Mock 一并带走。
+
+元信息栏的字段顺序是：**接口名称 → 状态 → 目录 → 标签**。改「接口名称」时侧栏标题实时跟随。
+
+### 保存按钮的位置
+
+「保存」在请求行的右端（原来的「curl 导入」位置），文案随页签变化（保存 / 保存用例 / 保存 Mock），右侧的 `▾` 下拉里是「另存为」与「删除」。设计页没有可发送的请求行，保存按钮挂在顶部契约地址行（Method / URL / 协议）的右端；用例与 Mock 面板底部另有一份自己的保存按钮。切换模式时按钮跟着重建。
+
+模式页签行的右端现在是「curl 导入」，未保存徽标（`未保存 · 用例未保存 · Mock 未保存`）也在那一行。
+
+顶部工具栏只保留「+ 新建」与「✦ AI 起草接口」两个新建类入口。
+
+## 设计与调试
+
+「接口设计」页签下，设计与调试是两个独立的模式页签，职责不同：
+
+| 模式 | 定位 | 内容 | 能否发送 |
+|---|---|---|---|
+| **设计** | 契约定义 | 参数表（参数名 / 类型 / 必填 / 示例值 / 描述）、Body 结构、响应结构 | 否 |
+| **调试** | 发送调试 | 上下分栏：上方请求构建区，下方常驻响应区 | 是 |
+
+### 设计页
+
+单栏文档式布局，用于把接口「该长什么样」说清楚，不提供发送按钮。参数表比调试页多了两个契约字段：
+
+- **类型**：`String / Integer / Number / Boolean / Array / Object / File`
+- **必填**：勾选后会写进导出文档的 `required`（OpenAPI 的 `required` 数组取自这里）
+
+### 示例值 vs 实际值
+
+设计页的「示例值」写在 `parameter[].example_value`，调试页实际发送用的是 `parameter[].value`，两者互不影响。改示例值不会改变真正发出去的请求。
+
+导出文档时优先取示例值，老数据（只有 `value`）会自动回落，因此升级不会让已有文档的示例列变空。
+
+### 调试页
+
+上下分栏，中间横向拖拽条可调整高度（默认 60% / 40%，记在 `localStorage`）。请求区在上、响应区在下，两块都能在自己的区域内滚动。
+
+请求页签共 8 个，页签上带启用参数计数：`Header` / `Query` / `Path` / `Body` / `认证` / `Cookie` / `预执行操作` / `后执行操作`。
+
+响应区也是常驻的，6 个页签：`实时响应` / `响应头` / `Cookie` / `响应示例` / `实际请求` / `控制台`。响应按接口缓存在内存里，切走再切回来还在（刷新页面清空，不落盘）。
+
+### 分阶段耗时
+
+点响应区的耗时数字展开 8 段明细：
+
+| 段 | 含义 |
+|---|---|
+| Request | 发出请求 |
+| Socket | 分配套接字 |
+| Lookup | DNS 查询 |
+| Connect | TCP 建连 |
+| SecureConnect | TLS 握手（仅 https） |
+| Response | 等待首字节（TTFB） |
+| End | 下载响应体 |
+| Done | 端到端总计 |
+
+各段刻意做成**不重叠**，因此条形图可以直接堆叠相加。HTTP/2 与历史记录没有分阶段数据，只显示总计。
+
+> 为了采集这些数据，HTTP/1.1 请求走 `src/exec/timed-request.js`（基于 `node:http(s)`），而不是 `fetch`——`fetch` 不暴露 DNS / TCP / TLS 各阶段。HTTP/2 与显式注入 `fetchImpl` 的场景仍走 `fetch`。
+
+## 断言
+
+断言配置在「后执行操作」页签里，是接口校验规则的唯一入口。执行顺序：先跑后置脚本（脚本可能写入变量），再按顺序判定断言。
+
+### 任务结构
+
+断言与自定义脚本共用 `request.post_tasks`，靠 `type` 区分——脚本执行器只认 `customScript`，所以断言不会被误当脚本执行：
+
+```json
+{
+  "id": "as_xxx",
+  "type": "assert",
+  "name": "业务码为 0",
+  "enabled": 1,
+  "data": {
+    "source": "response_json",
+    "expression": "$.code",
+    "condition": "equal",
+    "value": "0",
+    "description": "业务码为 0"
+  }
+}
+```
+
+### 12 种数据源
+
+| 数据源 | 表达式 | 说明 |
+|---|---|---|
+| `status_code` | 空 | 响应状态码 |
+| `elapsed_time` | 空 | 总耗时（ms） |
+| `content_type` | 空 | Content-Type 头 |
+| `response_header` | Header 名 | 大小写不敏感 |
+| `response_cookie` | Cookie 名 | 读 `Set-Cookie` |
+| `response_json` | JSONPath | `$` / `.a` / `['a']` / `[0]` / `[*]` |
+| `response_text` | 空 | 响应全文 |
+| `response_xml` | 标签路径 | 如 `/root/name`，不支持命名空间与属性 |
+| `response_schema` | `default` 或示例 ID | 按期望的 JSON Schema 递归校验 |
+| `var` | 变量名 | 运行期临时变量 |
+| `env_var` | 变量名 | 环境变量 |
+| `global_var` | 变量名 | 全局变量 |
+
+JSONPath 是精简实现：不支持 `..` 递归下降与过滤器，复杂场景请用后置脚本的 `apt.expect`。
+
+### 15 种条件
+
+`equal` / `not_equal` / `include` / `not_include` / `regex` / `gt` / `lt` / `gte` / `lte` / `length_equal` / `exists` / `empty` / `type_is` / `schema_match` / `schema_not_match`
+
+`equal` 是宽松比较：`200` 与 `"200"` 视为相等，对象与 JSON 字符串会解析后再比。
+
+### 向后兼容
+
+旧接口的 `response.is_check_result` + `example[].expect` 结构校验**仍然生效**，未迁移的接口行为零变化。「后执行操作」页签在检测到该标记时会显示「迁移为断言」按钮，可把状态码 / Content-Type / 响应头 / Schema 转成断言行并置 `is_check_result = -1`。迁移是显式操作，不会静默改变既有校验。
 
 ## 代码生成
 
-调试页签的响应区有「生成代码」按钮，把本次实际发出的请求转成六种可运行代码：
+调试页的响应区有「生成代码」按钮，把本次实际发出的请求转成六种可运行代码：
 
 | 语言 | 产出 |
 |---|---|
@@ -423,6 +601,21 @@ AI 相关配置不在命令行里，统一在控制台「外观设置 → AI 设
 **控制台显示「数据目录不可用」**
 说明目录无法创建或没有写权限。在「外观设置 → 数据目录」里换一个可写目录，或用 `--data-root "D:\..."` 指定后重启。
 
+**请求体是一整行，看着难受**
+请求体编辑器上方有「美化 / 压缩」按钮，能把单行 JSON 转成缩进多行（XML/HTML 则是「格式化 XML」）。所有 JSON 编辑区（Body、响应示例、Mock schema、用例输入）都有这个工具条。
+
+**改了设计页的示例值，调试页发出去的请求怎么没变**
+这是刻意设计。设计页的「示例值」存在 `example_value`，调试页实际发送用 `value`，两者互不影响。要改实际发送的值，请到调试页对应页签改。
+
+**Cookie 页签填了但请求里没有**
+检查 Header 里是否也有一条 `Cookie`。执行层只在没有 `Cookie` 请求头时才用 Cookie 表，同时存在时以 Header 为准。Cookie 页签顶部会显示黄条提示，可点「删掉 Header Cookie」或「迁到 Cookie 表」。
+
+**断言没生效 / 校验结果和以前不一样**
+旧接口的 `response.is_check_result` 结构校验默认仍生效，可视化断言是另一套机制。两者可以并存，但校验规则会分散在两处。想统一到断言表，请到「后执行操作」点「迁移为断言」。
+
+**响应耗时只有总数，看不到 DNS / TLS 各段**
+分阶段耗时只对 HTTP/1.1 采集。把接口协议切到 `http/1.1` 再发一次；HTTP/2 与历史记录只有总耗时。
+
 **删掉了默认项目，重启后还会再出现吗**
 不会。默认项目只在数据目录**首次初始化**时播种一次；之后即使把项目全部删光，重启也不会再自动创建。需要时在「总览」点「新建项目」即可。
 
@@ -510,11 +703,27 @@ src/
   version.js           版本号单一来源
   desktop/             桌面端（Electron 主进程 / preload / 服务附着 / 窗口状态）
   store/               数据读写（paths/projects/apis/envs/flows/flows-nodes/runs/recent/target）
-  exec/                执行引擎（http/auth/template/assert/script/runner）
+  exec/                执行引擎（http/auth/template/assert/script/runner/stress）
+                       ├─ timed-request.js   8 段耗时传输层（node:http(s)）
+                       └─ assert-visual.js   可视化断言（12 数据源 × 15 条件）
   mcp/                 工具定义（schemas/tools）、协议（protocol）、stdio
   openapi/convert.js   OpenAPI 3.0/3.1 转换
-  server/              HTTP 服务、配置、客户端配置生成、AI 客户端（ai.js）
-web/                   控制台（index.html / app.js / design.js / automation.js / codegen.js / theme.css / style.css）
+  server/              HTTP 服务、配置、客户端配置生成、AI 客户端（ai.js）、Mock 服务
+web/                   控制台
+  ├─ index.html        页面骨架与脚本顺序
+  ├─ app.js            整体状态、侧栏、总览、客户端配置
+  ├─ design.js         接口设计：树、设计页契约视图、批量编辑、右键菜单、多标签页
+  ├─ workspace.js      调试页工作区：上下分栏、8 请求页签、6 响应页签、耗时明细
+  ├─ envvars.js        环境与变量
+  ├─ extra.js          接口用例 / 一键压测 / Mock 面板
+  ├─ automation.js     自动化测试编排与报告
+  ├─ transfer.js       导入导出页
+  ├─ recent.js         最近
+  ├─ codegen.js        代码生成（六种语言）
+  ├─ curl-parse.js     cURL 解析（三种方言）
+  ├─ curl-build.js     cURL 生成
+  ├─ style.css         组件样式
+  └─ theme.css         主题变量
 build/                 gen-icon.mjs 生成的 icon.ico（9 档多尺寸）/ icon.png
 test/                  node:test 测试
 scripts/               gen-assets.mjs / gen-icon.mjs / build.mjs / build-desktop.mjs
@@ -522,17 +731,26 @@ scripts/               gen-assets.mjs / gen-icon.mjs / build.mjs / build-desktop
 
 `src/store/flow-nodes.js` 定义执行计划的节点模型（接口步骤 + 五种控制器）与规范化校验；`src/server/ai.js` 封装 OpenAI 兼容客户端与三个 AI 能力。
 
+`web/` 下的脚本按 `index.html` 的顺序加载，全部通过 `window.*` 桥接互相调用（`ApiDesign` / `ApiWorkspace` / `ApiExtra` 等），没有构建步骤。
+
 ## 测试
 
 ```powershell
 npm test
 ```
 
-当前 285 项测试。
+当前 354 项测试。
 
-覆盖：数据根解析与首次初始化播种（含幂等与优先级）、模板变量优先级、鉴权构造、schema 校验、OpenAPI 转换、本地数据目录读写（含越界保护）、存储 CRUD、执行引擎（含脚本沙箱、跨步骤传值、步骤快照固化）、MCP 协议与 34 工具名一致性、HTTP 服务鉴权与新建项目接口、接口编辑器 CRUD（含级联删除与落盘验证）、桌面端服务附着（含数据目录同源校验）与窗口状态、五页签数据域隔离（`preserve_aux`）、调试详情（`live_detail`）、用例响应头 / Content-Type 校验、压测进度时间线、Mock 自定义响应头、图标 ICO 结构。
+覆盖：数据根解析与首次初始化播种（含幂等与优先级）、模板变量优先级、鉴权构造、schema 校验、OpenAPI 转换、本地数据目录读写（含越界保护）、存储 CRUD、执行引擎（含脚本沙箱、跨步骤传值、步骤快照固化）、MCP 协议与 34 工具名一致性、HTTP 服务鉴权与新建项目接口、接口编辑器 CRUD（含级联删除与落盘验证）、桌面端服务附着（含数据目录同源校验）与窗口状态、设计 / 用例 / Mock 三个数据域的脏标记隔离（`preserve_aux`）、调试详情（`live_detail`）、用例响应头 / Content-Type 校验、压测进度时间线、Mock 自定义响应头、图标 ICO 结构。
 
 新增覆盖：代码生成六种语言的产出与转义、文档导出三种格式与空壳示例过滤、`/doc` 只读文档页鉴权、控制器节点模型与向后兼容、条件分支与 else 分支、次数循环、While 上限保护、等待与脚本控制器、`stop_on_fail` 中止、报告树与计划结构同构、AI 配置不泄漏 Key、OpenAI 兼容客户端（含 401 / 429 / 超时 / 非 JSON 响应）、三个 AI 端点在未配置时的明确报错。
+
+最近新增：
+
+- **分阶段耗时**（`test/timed-request.test.mjs`，13 项）— 8 段字段齐全且非负、302/307 跳转语义、gzip/deflate 解压、多 `Set-Cookie` 收集、`asFetchLike` 的 fetch 兼容接口、连接失败带 `networkStage`
+- **可视化断言**（`test/assert-visual.test.mjs`，48 项）— JSONPath 各种写法、XML 路径、12 数据源、15 条件、`schema_match` 复用 `validateSchema`
+- **断言接线与耗时透出**（`test/send.test.mjs` 追加 6 项）— 断言通过 / 失败 / 禁用、与自定义脚本共存、旧 `is_check_result` 路径不变、`timings` 贯穿到落盘记录
+- **`example_value` 导出兜底**（`test/docexport.test.mjs` 追加 2 项）— 老数据回落 `value`、新数据优先 `example_value`
 
 ## 控制台
 
@@ -540,7 +758,7 @@ npm test
 |---|---|
 | 总览 | 服务状态、Token、数据目录、项目授权、新建项目、快速开始 |
 | 环境与变量 | 三个页签：环境（多环境 + 环境变量 + 多 host 服务）、全局参数（含目录参数继承）、全局变量；每个页签底部含可折叠的使用说明 |
-| 接口设计 | 接口树 + 六页签编辑器（基础 / 参数 / Body / 鉴权 / 脚本 / 响应），右侧另有设计 / 调试 / 接口用例 / 一键压测 / Mock 五个独立数据域；目录也有「基础 / 参数 / Body / 鉴权 / 脚本」五个子页签 |
+| 接口设计 | 接口树 + 顶部多标签页 + 五个模式页签（设计 / 调试 / 接口用例 / 一键压测 / Mock）。设计页是契约视图；调试页上下分栏，含 8 个请求页签与 6 个响应页签；目录有「目录设置 / 目录参数 / 接口列表」三个子页签 |
 | 自动化测试 | 执行计划列表 + 步骤树编排（接口步骤与五种控制器嵌套）+ 可视化执行报告 |
 | 导入导出 | 导入 OpenAPI 3.x / Swagger 2.0 / Postman v2.1 / HAR / cURL / AI 解析（先预览再落库，可选目标目录与覆盖方式）；导出 OpenAPI（JSON / YAML）/ Postman v2.1 / Markdown / HTML / Word，并可打开只读文档页 |
 | 客户端配置 | Cursor / Claude Code / VS Code / Trae / Codex 配置一键复制 |
@@ -550,9 +768,21 @@ npm test
 
 「接口设计」的编辑直接写入本地数据目录，保存即时生效。
 
-设计 / 调试 / 接口用例 / 一键压测 / Mock 五个页签各自独立：设计保存只提交设计字段（不会覆盖用例与 Mock），用例与 Mock 页签各有自己的「未保存」标记与 Ctrl+S，压测与 Mock 页签的请求栏只读。
+五个模式页签各自独立：设计保存只提交设计字段（不会覆盖用例与 Mock），用例与 Mock 页签各有自己的「未保存」标记与 Ctrl+S，压测与 Mock 页签的请求栏只读。
 
-「调试」页签展示实际发出的完整请求头、Query、请求体、状态行、响应头、逐条 `Set-Cookie` 与实际 URL，并支持「隐藏敏感值」开关、「复制为 cURL」与「生成代码」（六种语言）。这些详情只在本机即时返回，落盘的执行历史仍按 `authorization / cookie / token` 等敏感键打码。
+顶部标签栏支持同时打开多个接口（上限 12 个），每个标签页保留自己的未保存草稿与所处模式；切换项目时清空，因为标签页只在当前项目内有效。
+
+「调试」页展示实际发出的完整请求头、Query、请求体、状态行、响应头、逐条 `Set-Cookie` 与实际 URL，并支持「隐藏敏感值」开关、「复制为 cURL」与「生成代码」（六种语言）。这些详情只在本机即时返回，落盘的执行历史仍按 `authorization / cookie / token` 等敏感键打码。
+
+### 请求失败时
+
+DNS 失败、连接超时、证书错误等拿不到响应的情况，响应区不再摆出一堆空页签，只显示三样东西：
+
+- 错误信息（例如 `请求失败：... (ENOTFOUND: ...) — https://xxx`）
+- 折叠的「发送日志」（有内容时才出现，含未解析变量等告警）
+- 展开的「实际请求」：真正发出去的方法、URL、请求头、Query 与请求体
+
+对照「实际请求」能直接看出问题，例如请求头里的 `{{uat-api-token}}` 没被环境变量替换掉。变量未解析时会在发送日志里给出 `未解析的变量：uat-api-token（将按字面量发送）`，请求仍照常发出——可能是有意发占位符，所以只告警不拦截。
 
 ## 工具清单
 
@@ -567,11 +797,20 @@ npm test
 
 ## 限制
 
-- 仅支持 HTTP 接口执行（`target_type === 'api'`）；SSE / WebSocket / gRPC / Mock / 数据库请求不在工具范围内
-- 鉴权支持 `noauth / basic / bearer / kv(apikey) / oauth2(静态 token) / inherit`；`awsv4 / digest / hawk / ntlm / oauth1 / edgegrid / asap / jwt` 会明确报错
-- 全局/目录参数的 Body 只支持 `form-data` 与 `urlencoded`；Header / Query / 鉴权 / 前后置脚本可继承；Cookie 由 Header 的 `Cookie` 键表达（界面不再提供 Cookie 参数表）
+- 仅支持 HTTP 接口执行（`target_type === 'api'`）；SSE / WebSocket / gRPC / Mock / 数据库请求不在工具范围内。SSE 只有类型定义占位，界面上的「Event Stream」入口置灰
+- 鉴权支持 `noauth / basic / bearer / kv(apikey) / oauth2(静态 token) / inherit`；界面上会列出 Digest / AWS Signature / NTLM / OAuth 1.0 / Hawk / EdgeGrid，选中时明确提示「执行层暂不支持」并建议用预执行脚本手工签名
+- 全局/目录参数的 Body 只支持 `form-data` 与 `urlencoded`；Header / Query / 鉴权 / 前后置脚本可继承
+- Cookie 有两种写法（独立参数表 / Header 的 `Cookie` 键），但执行层只在没有 `Cookie` 请求头时才用参数表，同时存在时以 Header 为准
 - 全局参数与目录参数的执行顺序：前置脚本 `全局 → 目录 → 接口`，后置脚本 `接口 → 目录 → 全局`；同名参数内层优先，内层 `is_checked = -1` 表示禁用外层同名项
+- 可视化断言的数据源含 `response_xml`，但只支持简单标签路径（`/root/name`），不支持命名空间、属性筛选与同名标签嵌套；复杂场景请用后置脚本
+- JSONPath 是精简实现，不支持 `..` 递归下降、过滤器与切片
+- `response.is_check_result` 与可视化断言是两套机制，旧接口默认仍走前者；迁移需在「后执行操作」手动点「迁移为断言」
 - 代码生成覆盖 cURL / fetch / axios / Python / Go / Java 六种；`form-data` 与 `binary` 模式无法用文本还原，会给出 warning 而不是编造数据
+- 分阶段耗时只对 HTTP/1.1 生效；HTTP/2 与显式注入 `fetchImpl` 的场景只有总耗时
+- form-data 的「内容类型」列只影响 multipart 分段的 `Content-Type`，`urlencoded` 不使用该列
+- 批量编辑的 Raw-Json 格式只接受扁平对象，遇到嵌套结构会明确报错而不会自动拍平
+- 顶部多标签页只在当前项目内有效，切换项目会清空；仅存内存，刷新页面后清空
 - Word 导出为 `.doc`（HTML 包装），不是 `.docx`；Word / WPS 可直接打开，但部分老版本会提示「格式与扩展名不一致」
 - 执行计划目前只由 Web 控制台与 MCP 工具操作；控制器条件使用 JS 表达式，暂不提供可视化条件构建器
 - AI 能力需要外网可访问的 OpenAI 兼容服务；本地模型（如 Ollama）也可用，但需自行启动
+- 「IDEA 上传」需要配套插件，当前版本置灰并提供原因说明

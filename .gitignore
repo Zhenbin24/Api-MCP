@@ -7,6 +7,11 @@ web/icon.png
 .DS_Store
 tmp-debug.mjs
 
+# 本地调试/验证用的临时数据目录与脚本
+.uihome/
+.verifyhome/
+_tmp_*.py
+
 # IDE 配置（含个人偏好，不入库）
 .idea/
 .vscode/

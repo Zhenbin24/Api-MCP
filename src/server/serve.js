@@ -23,6 +23,7 @@ import {
   readApiIndex,
   writeApiIndex,
   updateApiIndexItem,
+  collectDescendantApiIds,
   TARGET_TYPE
 } from '../store/apis.js';
 import {
@@ -145,6 +146,18 @@ function uiTokenFrom(req) {
 }
 
 /**
+ * 解析导出/文档范围：`api=<id>` 只导出该接口，`folder=<id>` 导出该目录及其子目录。
+ * 都不传时返回 undefined，表示整个项目（MCP 与「导入导出」页的默认行为）。
+ */
+function resolveExportTargetIds(target, url) {
+  const apiId = url.searchParams.get('api');
+  if (apiId) return [String(apiId)];
+  const folderId = url.searchParams.get('folder');
+  if (folderId) return collectDescendantApiIds(target, String(folderId));
+  return undefined;
+}
+
+/**
  * 启动本地 HTTP 服务。
  * @param {object} opts
  * @param {object} opts.config  已加载配置（可变，保存时写盘）
@@ -237,7 +250,7 @@ export function createServer({ config, dataRoot, log = () => {} }) {
       res.end(readWebAsset('index.html'));
       return;
     }
-    if (req.method === 'GET' && /^\/(app|design|envvars|extra|recent|automation|transfer|curl-parse|curl-build|codegen|theme|style)\.(js|css)$/.test(pathname)) {
+    if (req.method === 'GET' && /^\/(app|design|workspace|envvars|extra|recent|automation|transfer|curl-parse|curl-build|codegen|theme|style)\.(js|css)$/.test(pathname)) {
       const name = pathname.slice(1);
       try {
         const content = readWebAsset(name);
@@ -281,7 +294,9 @@ export function createServer({ config, dataRoot, log = () => {} }) {
         }
         const target = openProject({ dataRoot, projectId });
         const { projectToHtml } = await import('../io/export.js');
-        const doc = projectToHtml(target, { projectId, projectName: meta.name });
+        // 支持只分享单个接口（api=）或整个目录（folder=）
+        const targetIds = resolveExportTargetIds(target, url);
+        const doc = projectToHtml(target, { projectId, projectName: meta.name, targetIds });
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
         res.end(doc.content);
         return;
@@ -1206,6 +1221,8 @@ export function createServer({ config, dataRoot, log = () => {} }) {
           protocol: step?.response?.protocol || 'HTTP/1.1',
           request: step?.request || null,
           response: step?.response || null,
+          // 分阶段耗时（DNS / TCP / TLS / TTFB / 下载），HTTP/2 时为 null
+          timings: step?.response?.timings || summary.live_detail?.response?.timings || null,
           // 二进制原始字节只在即时响应里给，不落盘
           content_type: summary.content_type || step?.response?.content_type || '',
           is_binary: Boolean(summary.is_binary ?? step?.response?.is_binary),
@@ -1341,10 +1358,13 @@ export function createServer({ config, dataRoot, log = () => {} }) {
         try {
           const target = projectTarget();
           const meta = listProjects(dataRoot).find((p) => p.project_id === projectId);
+          // 「外部调用 OpenAPI」等入口可以只导出单个接口或单个目录
+          const targetIds = resolveExportTargetIds(target, url);
           const result = exportProject(target, {
             projectId,
             projectName: meta?.name,
-            format
+            format,
+            targetIds
           });
           const encoded = encodeURIComponent(result.filename);
           res.writeHead(200, {

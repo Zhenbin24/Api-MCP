@@ -1,11 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { applyAuth, mergeAuthInto } from './auth.js';
-import { renderTemplate, createVariableScope } from './template.js';
+import { renderTemplate, createVariableScope, collectUnknownTokens } from './template.js';
 import { collectScripts, runScript } from './script.js';
 import { validateSchema, parseJsonSafe } from './assert.js';
 import { redact } from '../store/runs.js';
 import { transmitHttp2 } from './http2.js';
+import { requestWithTimings, asFetchLike } from './timed-request.js';
+import { runVisualAssertions } from './assert-visual.js';
 
 const RAW_MODES = new Set(['raw', 'json', 'xml', 'html', 'javascript', 'plain', 'text', 'msgpack']);
 
@@ -254,20 +256,27 @@ function buildBodyFromParams(paramList, mode, sub = (v) => renderValue(v)) {
   const chunks = [];
   for (const p of activeParams(paramList)) {
     const type = String(p.field_type || p.type || '').toLowerCase();
+    // 「内容类型」列：auto 时按现状推断，否则用用户指定的值
+    const declaredType = String(p.content_type || 'auto').trim();
+    const useDeclared = declaredType && declaredType.toLowerCase() !== 'auto';
     if (type === 'file') {
       const filePath = p.value;
       if (filePath && fs.existsSync(String(filePath))) {
         const name = path.basename(String(filePath));
+        const partType = useDeclared ? declaredType : 'application/octet-stream';
         chunks.push(
           Buffer.from(
-            `--${boundary}\r\nContent-Disposition: form-data; name="${p.key}"; filename="${name}"\r\nContent-Type: application/octet-stream\r\n\r\n`
+            `--${boundary}\r\nContent-Disposition: form-data; name="${p.key}"; filename="${name}"\r\nContent-Type: ${partType}\r\n\r\n`
           ),
           fs.readFileSync(String(filePath)),
           Buffer.from('\r\n')
         );
       }
     } else {
-      chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${p.key}"\r\n\r\n${sub(p.value)}\r\n`));
+      const partHeader = useDeclared
+        ? `--${boundary}\r\nContent-Disposition: form-data; name="${p.key}"\r\nContent-Type: ${declaredType}\r\n\r\n`
+        : `--${boundary}\r\nContent-Disposition: form-data; name="${p.key}"\r\n\r\n`;
+      chunks.push(Buffer.from(`${partHeader}${sub(p.value)}\r\n`));
     }
   }
   chunks.push(Buffer.from(`--${boundary}--\r\n`));
@@ -315,8 +324,11 @@ export async function executeRequest(opts) {
     extraPostScript = '',
     cookieJar = createCookieJar(),
     timeoutMs = 60000,
-    fetchImpl = globalThis.fetch
+    /** 显式注入时仍走 fetch（测试与 HTTP/2 场景）；为 null 时走自建传输层以采集分阶段耗时 */
+    fetchImpl = null
   } = opts;
+
+  const doFetch = fetchImpl || globalThis.fetch;
 
   const startedAt = Date.now();
   const now = new Date().toISOString();
@@ -480,6 +492,27 @@ export async function executeRequest(opts) {
 
   request.url = finalUrl;
 
+  // 未解析的 {{变量}} 会被原样发出（keepUnknown），这里显式告警，避免静默带着占位符请求
+  try {
+    const unknown = collectUnknownTokens(
+      {
+        url: finalUrl,
+        headers: request.headers,
+        query: request.query,
+        body: request.bodyText
+      },
+      scope
+    );
+    if (unknown.length > 0) {
+      logs.push({
+        level: 'warn',
+        message: `未解析的变量：${unknown.join(', ')}（将按字面量发送）`
+      });
+    }
+  } catch {
+    // 变量检查失败不应影响请求本身
+  }
+
   // Cookie 头
   const jarHeader = cookieJar.header();
   const cookieHeader = [
@@ -511,6 +544,8 @@ export async function executeRequest(opts) {
   let response;
   let usedProtocol = 'HTTP/1.1';
   let protocolWarning = null;
+  let requestTimings = null;
+  let finalUrlResolved = finalUrl;
   const netStart = Date.now();
   try {
     if (wantHttp2) {
@@ -522,9 +557,22 @@ export async function executeRequest(opts) {
         timeoutMs
       });
       if (h2.fallback) {
-        // http: 不能走 h2，回退到 fetch
+        // http: 不能走 h2，回退到 HTTP/1.1（默认走自建传输层以采集耗时）
         protocolWarning = h2.reason;
-        response = await fetchImpl(finalUrl, fetchOptions);
+        if (fetchImpl) {
+          response = await doFetch(finalUrl, fetchOptions);
+        } else {
+          const timed = await requestWithTimings({
+            url: finalUrl,
+            method,
+            headers: request.headers,
+            body: fetchOptions.body,
+            timeoutMs
+          });
+          response = asFetchLike(timed);
+          requestTimings = timed.timings;
+          finalUrlResolved = timed.finalUrl;
+        }
       } else {
         usedProtocol = 'HTTP/2';
         response = {
@@ -541,8 +589,20 @@ export async function executeRequest(opts) {
           __h2: h2
         };
       }
+    } else if (fetchImpl) {
+      response = await doFetch(finalUrl, fetchOptions);
     } else {
-      response = await fetchImpl(finalUrl, fetchOptions);
+      // 默认路径：自建传输层，能给出 DNS / TCP / TLS / TTFB / 下载 的分段耗时
+      const timed = await requestWithTimings({
+        url: finalUrl,
+        method,
+        headers: request.headers,
+        body: fetchOptions.body,
+        timeoutMs
+      });
+      response = asFetchLike(timed);
+      requestTimings = timed.timings;
+      finalUrlResolved = timed.finalUrl;
     }
   } catch (err) {
     const cause = err?.cause;
@@ -619,7 +679,10 @@ export async function executeRequest(opts) {
     too_large_for_base64: Boolean(bodyBuffer && bodyBuffer.length > MAX_BASE64_BYTES),
     size: bodyBuffer?.length || 0,
     setCookies,
-    protocol: usedProtocol
+    protocol: usedProtocol,
+    // 分阶段耗时（DNS / TCP / TLS / TTFB / 下载）；fetch 分支与 HTTP/2 为 null
+    timings: requestTimings || null,
+    finalUrl: finalUrlResolved || finalUrl
   };
 
   // ---- 后置脚本 ----
@@ -644,6 +707,20 @@ export async function executeRequest(opts) {
     logs.push(...result.console);
     if (result.error) scriptErrors.push({ phase: 'post', message: result.error });
   }
+
+  // ---- 可视化断言（post_tasks 里 type === 'assert' 的任务） ----
+  // 放在后置脚本之后：脚本可能写下变量，断言要用到最新值；
+  // 放在 is_check_result 结构校验之前：两者在响应区按同一套结果展示。
+  const visualAssertions = runVisualAssertions(conf.post_tasks, {
+    response: responseInfo,
+    request,
+    elapsedMs: networkElapsed,
+    variables: scope,
+    envVars: env?.env_var_list || {},
+    globalVars,
+    apiDetail
+  });
+  assertions.push(...visualAssertions);
 
   // ---- 结构校验（response.is_check_result + example[].expect） ----
   if (Number(apiDetail.response?.is_check_result) === 1) {
@@ -825,7 +902,8 @@ function finalize({
           content_type: response.content_type || '',
           is_binary: Boolean(response.is_binary),
           // 落盘记录只留标记，不存 base64（避免 50 条历史膨胀）
-          has_binary: Boolean(response.body_base64)
+          has_binary: Boolean(response.body_base64),
+          timings: response.timings || undefined
         })
       : null,
     assertions,
@@ -859,7 +937,8 @@ function finalize({
             headers: response.headers,
             set_cookies: response.setCookies || [],
             size: response.size,
-            content_type: response.content_type || ''
+            content_type: response.content_type || '',
+            timings: response.timings || null
           }
         : null
     }

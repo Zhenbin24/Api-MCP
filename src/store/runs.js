@@ -80,6 +80,8 @@ export function saveRun(target, run) {
       status_code: s.status_code,
       network_elapsed_ms: s.network_elapsed_ms,
       elapsed_ms: s.elapsed_ms,
+      // 分阶段耗时（DNS / TCP / TLS / TTFB / 下载），fetch 与 HTTP/2 场景为空
+      timings: s.timings || s.response?.timings || undefined,
       input: s.input,
       request: s.request,
       response: s.response,

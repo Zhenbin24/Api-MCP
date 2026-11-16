@@ -92,6 +92,45 @@ export function renderDeep(value, scope, opts) {
   return renderTemplate(value, scope, opts);
 }
 
+/**
+ * 收集未能解析的变量名（去重，保留出现顺序）。
+ *
+ * renderTemplate 默认 keepUnknown=true，查不到就原样保留占位符；
+ * 这个函数用来把「按字面量发出去了」这件事暴露到日志里，而不是静默通过。
+ * 内置函数（$timestamp 等）由 scope 自己提供，因此也会被正常计入或排除。
+ */
+export function collectUnknownTokens(input, scope) {
+  const out = [];
+  const seen = new Set();
+
+  const walk = (value) => {
+    if (value == null) return;
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item);
+      return;
+    }
+    if (typeof value === 'object') {
+      for (const item of Object.values(value)) walk(item);
+      return;
+    }
+    if (typeof value !== 'string') return;
+    if (value.indexOf('{{') < 0) return;
+
+    TOKEN_RE.lastIndex = 0;
+    let match;
+    while ((match = TOKEN_RE.exec(value)) !== null) {
+      const name = String(match[1]).trim();
+      if (!name || seen.has(name)) continue;
+      if (scope.get(name) !== undefined) continue;
+      seen.add(name);
+      out.push(name);
+    }
+  };
+
+  walk(input);
+  return out;
+}
+
 export function hasTemplate(str) {
   return typeof str === 'string' && /\{\{[^{}]+\}\}/.test(str);
 }

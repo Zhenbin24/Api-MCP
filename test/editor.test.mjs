@@ -255,23 +255,43 @@ test('编辑器：保存后官方目录立即更新', async () => {
   }
 });
 
-test('编辑器：design.js 与样式可访问', async () => {
+test('编辑器：design.js / workspace.js 与样式可访问', async () => {
   const { env, instance, base } = await boot();
   try {
     const js = await fetch(`${base}/design.js`);
     assert.equal(js.status, 200);
     const code = await js.text();
     assert.match(code, /interface|ApiDesign|viewApiDesign/);
+    // 调试模式已合并进接口工作区，不应再残留 debug 分支
+    assert.equal(/PLACEHOLDER_INFO[\s\S]*?debug:/.test(code), false);
+
+    const ws = await fetch(`${base}/workspace.js`);
+    assert.equal(ws.status, 200);
+    const wsCode = await ws.text();
+    assert.match(wsCode, /ApiWorkspace/);
+    assert.match(wsCode, /ws-splitter/);
+    // 上下分栏：拖拽按容器高度写 --ws-req-h
+    assert.match(wsCode, /ws-req-h/);
 
     const css = await fetch(`${base}/style.css`);
     assert.equal(css.status, 200);
     const style = await css.text();
     assert.match(style, /design-layout/);
     assert.match(style, /param-row/);
+    // 上下分栏、断言表样式与保存按钮组
+    assert.match(style, /\.ws-shell/);
+    assert.match(style, /\.ws-splitter/);
+    assert.match(style, /--ws-req-h/);
+    assert.match(style, /\.save-split/);
+    assert.match(style, /\.assert-row/);
+    assert.match(style, /\.timing-breakdown/);
+    // curl 导入在模式页签行右端
+    assert.match(style, /\.curl-import-btn/);
 
     const page = await fetch(`${base}/?ui=test-ui`);
     const html = await page.text();
     assert.match(html, /design\.js/);
+    assert.match(html, /workspace\.js/);
   } finally {
     await instance.close();
     cleanup(env.base);

@@ -179,8 +179,139 @@ test('文档页 /doc：返回只读 HTML，缺少参数时报 400', async () => 
   }
 });
 
+/* ---------------- example_value：设计页示例值与导出兜底 ---------------- */
+
+test('文档导出：旧数据（只有 value）示例值仍正确回落', async () => {
+  const { env, instance, req } = await boot();
+  try {
+    const api = await req('POST', `/api/projects/${env.projectId}/apis`, {
+      name: '旧数据接口',
+      target_type: 'api',
+      method: 'GET',
+      url: 'https://api.test/legacy'
+    });
+    const id = api.data.target_id;
+
+    const detail = await req('GET', `/api/projects/${env.projectId}/apis/${id}`);
+    const data = detail.data.data;
+    // 只有 value，没有 example_value
+    data.request.query.parameter = [
+      { key: 'page', value: '3', field_type: 'Integer', description: '页码', is_checked: 1, not_null: -1, param_id: 'q1' }
+    ];
+    await req('PUT', `/api/projects/${env.projectId}/apis/${id}`, { data });
+
+    // OpenAPI：example 应回落到 value
+    const openapi = await req('GET', `/api/projects/${env.projectId}/export?format=openapi`);
+    const spec = typeof openapi.data === 'string' ? JSON.parse(openapi.data) : openapi.data;
+    const params = spec.paths['/legacy'].get.parameters;
+    const page = params.find((p) => p.name === 'page');
+    assert.ok(page, '应导出 page 参数');
+    assert.equal(page.example, '3', '没有 example_value 时应回落到 value');
+
+    // Markdown：示例值列应显示 value
+    const md = await req('GET', `/api/projects/${env.projectId}/export?format=markdown`);
+    assert.match(String(md.data), /\|\s*page\s*\|.*\|\s*3\s*\|/);
+  } finally {
+    await instance.close();
+    cleanup(env.base);
+  }
+});
+
+test('文档导出：有 example_value 时优先取示例值', async () => {
+  const { env, instance, req } = await boot();
+  try {
+    const api = await req('POST', `/api/projects/${env.projectId}/apis`, {
+      name: '新数据接口',
+      target_type: 'api',
+      method: 'GET',
+      url: 'https://api.test/newschema'
+    });
+    const id = api.data.target_id;
+
+    const detail = await req('GET', `/api/projects/${env.projectId}/apis/${id}`);
+    const data = detail.data.data;
+    // 设计页示例值与调试页实际值不同
+    data.request.query.parameter = [
+      {
+        key: 'page',
+        value: '99',
+        example_value: '1',
+        field_type: 'Integer',
+        description: '页码',
+        is_checked: 1,
+        not_null: -1,
+        param_id: 'q1'
+      }
+    ];
+    await req('PUT', `/api/projects/${env.projectId}/apis/${id}`, { data });
+
+    const openapi = await req('GET', `/api/projects/${env.projectId}/export?format=openapi`);
+    const spec = typeof openapi.data === 'string' ? JSON.parse(openapi.data) : openapi.data;
+    const page = spec.paths['/newschema'].get.parameters.find((p) => p.name === 'page');
+    assert.equal(page.example, '1', '有 example_value 时应优先取它，而不是发送用的 value');
+
+    const md = await req('GET', `/api/projects/${env.projectId}/export?format=markdown`);
+    const text = String(md.data);
+    assert.match(text, /\|\s*page\s*\|.*\|\s*1\s*\|/, 'Markdown 示例值列应取 example_value');
+    assert.equal(/\|\s*page\s*\|.*\|\s*99\s*\|/.test(text), false, '不应把发送用的 value 当成示例值');
+  } finally {
+    await instance.close();
+    cleanup(env.base);
+  }
+});
+
 /** 从 server 实例取 base（listen 后才有 port） */
 function base0(instance) {
   const addr = instance.server?.address?.() || instance.address?.();
   return `http://127.0.0.1:${addr.port}`;
 }
+
+/* ---------------- 单接口 / 单目录导出（分享与外部调用 OpenAPI 复用） ---------------- */
+
+test('导出：api= 与 folder= 能把范围收窄到单个接口 / 单个目录', async () => {
+  const { env, instance, req, base } = await boot();
+  try {
+    const { folderId, apiId } = await seed(req, env.projectId);
+
+    // 另一个接口放在根目录，用来验证不会被带上
+    const other = await req('POST', `/api/projects/${env.projectId}/apis`, {
+      name: '根目录接口',
+      target_type: 'api',
+      method: 'GET',
+      url: 'http://127.0.0.1:8000/other',
+      parent_id: '0'
+    });
+    const otherId = other.data.target_id;
+
+    // ---- OpenAPI：只含指定接口 ----
+    const single = await req('GET', `/api/projects/${env.projectId}/export?format=openapi&api=${apiId}`);
+    const spec = typeof single.data === 'string' ? JSON.parse(single.data) : single.data;
+    assert.ok(spec.paths['/users'], '应包含指定接口的 path');
+    assert.equal(spec.paths['/other'], undefined, '不应包含其他接口');
+
+    // ---- OpenAPI：按目录导出 ----
+    const byFolder = await req('GET', `/api/projects/${env.projectId}/export?format=openapi&folder=${folderId}`);
+    const folderSpec = typeof byFolder.data === 'string' ? JSON.parse(byFolder.data) : byFolder.data;
+    assert.ok(folderSpec.paths['/users']);
+    assert.equal(folderSpec.paths['/other'], undefined, '目录外接口不应出现');
+
+    // ---- 只读文档页：单接口 ----
+    const doc = await fetch(`${base}/doc?project=${env.projectId}&api=${apiId}&ui=test-ui`);
+    assert.equal(doc.status, 200);
+    const html = await doc.text();
+    assert.match(html, /创建用户/, '应包含该接口名称');
+    assert.equal(html.includes('根目录接口'), false, '不应包含其他接口');
+
+    // ---- 不传 api/folder 时仍是整个项目 ----
+    const all = await req('GET', `/api/projects/${env.projectId}/export?format=openapi`);
+    const allSpec = typeof all.data === 'string' ? JSON.parse(all.data) : all.data;
+    assert.ok(allSpec.paths['/users']);
+    assert.ok(allSpec.paths['/other'], '默认应导出整个项目');
+
+    // 清理用：确保 otherId 已使用，避免未使用变量告警
+    assert.ok(otherId);
+  } finally {
+    await instance.close();
+    cleanup(env.base);
+  }
+});
